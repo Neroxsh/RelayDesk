@@ -450,7 +450,9 @@ async function syncExternalChanges(config) {
       if (!selectedKey) return;
       const selected = sessions.find((session) => session.key === selectedKey);
       if (!selected) return;
-      const detail = await getSession(selected.provider, selected.id);
+      const detail = selected.currentWindow
+        ? await currentCodexDetail()
+        : await getSession(selected.provider, selected.id);
       await send(config, clientId, { type: "session:snapshot", session: detail });
     }),
   );

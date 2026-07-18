@@ -20,7 +20,8 @@ test("the product ships permanent pairing, projects, and both provider surfaces"
     readFile(new URL("../drizzle/0002_cuddly_mephistopheles.sql", import.meta.url), "utf8"),
   ]);
   assert.match(page, /永久连接密钥/);
-  assert.match(page, /当前 Codex 窗口/);
+  assert.match(page, /电脑当前任务/);
+  assert.match(page, /回答自动同步/);
   assert.match(page, /项目/);
   assert.match(page, /Codex/);
   assert.match(page, /Claude/);
@@ -39,6 +40,7 @@ test("the desktop bridge never exposes an arbitrary shell command endpoint", asy
   assert.match(agent, /payload\?\.type === "session:send"/);
   assert.match(agent, /prompt\.length > 12_000/);
   assert.match(agent, /message\.kind === "pair_request"/);
+  assert.match(agent, /selected\.currentWindow\s*\?\s*await currentCodexDetail\(\)/);
   assert.match(providers, /CommandType -eq 'Application'.*'\*\.cmd'/);
   assert.match(providers, /void completed\.catch/);
 });

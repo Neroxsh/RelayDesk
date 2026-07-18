@@ -80,6 +80,13 @@ function formatWhen(timestamp: number) {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
 }
 
+function formatMessageTime(timestamp?: string | null) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
 function phoneName() {
   const value = navigator.userAgent;
   if (/iPhone/i.test(value)) return "iPhone";
@@ -268,6 +275,8 @@ export default function Home() {
   const keyRef = useRef<CryptoKey | null>(null);
   const pairingRef = useRef<StoredPairing | null>(null);
   const optimisticRef = useRef(new Map<string, { sessionKey: string; messageId: string }>());
+  const waitingForReplyRef = useRef(new Map<string, string | null>());
+  const messageEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -321,6 +330,19 @@ export default function Home() {
       const session = payload.session as SessionDetail;
       setDetails((value) => ({ ...value, [session.key]: session }));
       setLiveMessages((value) => ({ ...value, [session.key]: [] }));
+      if (waitingForReplyRef.current.has(session.key)) {
+        const baseline = waitingForReplyRef.current.get(session.key);
+        const latestAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+        if (latestAssistant && latestAssistant.id !== baseline) {
+          waitingForReplyRef.current.delete(session.key);
+          setRunning((value) => {
+            const next = { ...value };
+            delete next[session.key];
+            return next;
+          });
+          setToast("Codex 已回复 · 内容已自动同步");
+        }
+      }
       return;
     }
     if (payload.type === "run:event" && payload.sessionKey && payload.event) {
@@ -338,17 +360,19 @@ export default function Home() {
       const status = String(payload.status ?? "");
       setRunning((value) => {
         const next = { ...value };
-        if (["completed", "failed", "submitted"].includes(status)) delete next[key];
-        else next[key] = status;
+        if (["completed", "failed"].includes(status)) delete next[key];
+        else next[key] = status === "submitted" ? "waiting" : status;
         return next;
       });
       if (status === "failed") {
+        waitingForReplyRef.current.delete(key);
         rollbackOptimistic(payload.requestId);
         setToast(String(payload.error ?? "电脑端执行失败"));
       } else if (["completed", "submitted"].includes(status) && payload.requestId) {
         optimisticRef.current.delete(payload.requestId);
       }
-      if (status === "submitted") setToast("已发送到电脑当前 Codex 窗口");
+      if (status === "completed") waitingForReplyRef.current.delete(key);
+      if (status === "submitted") setToast("已送达电脑 · 等待 Codex 回复");
       return;
     }
     if (payload.type === "request:error") {
@@ -433,13 +457,23 @@ export default function Home() {
   const selectedDetail = selectedKey ? details[selectedKey] : null;
   const messages = selectedKey ? [...(selectedDetail?.messages ?? []), ...(liveMessages[selectedKey] ?? [])] : [];
 
+  useEffect(() => {
+    if (!selectedKey) return;
+    const timer = setTimeout(() => messageEndRef.current?.scrollIntoView({ block: "end" }), 40);
+    return () => clearTimeout(timer);
+  }, [selectedKey, messages.length, running]);
+
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!selectedSummary || !draft.trim() || sending) return;
     if (!selectedSummary.currentWindow && mode === "full" && !window.confirm("完全控制会绕过本机权限确认。确定继续吗？")) return;
     const prompt = draft.trim();
     const remoteRequestId = requestId();
-    const optimisticId = `local-${Date.now()}`;
+    const optimisticId = `local-${remoteRequestId}`;
+    const latestAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+    if (selectedSummary.currentWindow) {
+      waitingForReplyRef.current.set(selectedSummary.key, latestAssistant?.id ?? null);
+    }
     setSending(true);
     setDraft("");
     setLiveMessages((value) => ({
@@ -465,6 +499,7 @@ export default function Home() {
         }));
         optimisticRef.current.delete(remoteRequestId);
       }
+      waitingForReplyRef.current.delete(selectedSummary.key);
       setToast(error instanceof Error ? error.message : "发送失败");
     } finally {
       setSending(false);
@@ -492,29 +527,29 @@ export default function Home() {
     <main className={`app-shell ${selectedKey ? "has-selection" : ""}`}>
       <aside className="session-panel">
         <header className="panel-header">
-          <div className="brand-lockup"><div className="brand-mark brand-mark-small"><span>R</span></div><div><strong>RelayDesk</strong><span>远程工作台</span></div></div>
-          <button className="icon-button" type="button" onClick={forgetPhone} title="此手机的连接设置">•••</button>
+          <div className="brand-lockup"><div className="brand-mark brand-mark-small"><span>R</span></div><div><strong>RelayDesk</strong><span>你的远程 AI 工作台</span></div></div>
+          <button className="icon-button" type="button" onClick={forgetPhone} title="管理此手机的连接" aria-label="管理此手机的连接">•••</button>
         </header>
-        <div className="device-card"><span className={`status-pulse ${device?.online ? "online" : ""}`} /><div><strong>{device?.name ?? pairing.device.name}</strong><span>{device?.online ? "电脑在线 · 实时同步" : "等待电脑上线"}</span></div><button className="refresh-button" type="button" onClick={() => void remoteSend({ type: "sessions:list", requestId: requestId() })}>↻</button></div>
+        <div className="device-card"><span className={`status-pulse ${device?.online ? "online" : ""}`} /><div><strong>{device?.name ?? pairing.device.name}</strong><span>{device?.online ? "在线 · 回答自动同步" : "离线 · 等待电脑上线"}</span></div><button className="refresh-button" type="button" title="立即同步" aria-label="立即同步" onClick={() => void remoteSend({ type: "sessions:list", requestId: requestId() })}>↻</button></div>
         {currentWindow ? (
           <button className={`current-window ${selectedKey === currentWindow.key ? "selected" : ""}`} type="button" onClick={() => setSelectedKey(currentWindow.key)}>
-            <span className="live-window-icon">⌁</span><span><b>电脑当前输入框 · 推荐</b><small>直接填入并发送到当前 Codex</small></span><i className="online-pin" />
+            <span className="live-window-icon">›_</span><span><b>继续电脑当前任务</b><small>发送到当前 Codex · 回答自动回来</small></span><i className="online-pin" />
           </button>
         ) : null}
-        <label className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目或会话" /></label>
-        <div className="project-heading"><span>项目</span><b>{projectGroups.length}</b></div>
+        <label className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目或对话" /></label>
+        <div className="project-heading"><span>项目与对话</span><b>{projectGroups.length} 个项目</b></div>
         <nav className="project-list" aria-label="项目和会话">
           {projectGroups.map((project) => {
             const isCollapsed = collapsed[project.path];
             return (
               <section className="project-group" key={project.path}>
                 <button className="project-row" type="button" onClick={() => setCollapsed((value) => ({ ...value, [project.path]: !value[project.path] }))}>
-                  <span className="folder-icon">⌑</span><span><strong>{project.name}</strong><small>{project.path}</small></span><i>{isCollapsed ? "›" : "⌄"}</i>
+                  <span className="folder-icon">⌑</span><span><strong>{project.name}</strong><small>{project.sessions.length} 个对话 · {project.path}</small></span><i>{isCollapsed ? "›" : "⌄"}</i>
                 </button>
                 {!isCollapsed ? <div className="project-sessions">{project.sessions.map((session) => (
                   <button className={`session-row ${selectedKey === session.key ? "selected" : ""}`} type="button" key={session.key} onClick={() => setSelectedKey(session.openInCodex && currentWindow ? currentWindow.key : session.key)}>
                     <span className={`provider-mark ${session.provider}`}>{session.provider === "codex" ? "C" : "A"}</span>
-                    <span className="session-copy"><strong>{session.title}</strong><span>{session.openInCodex ? "电脑当前已打开 · 点击将直接发送" : `${session.provider === "codex" ? "Codex" : "Claude Code"} · ${formatWhen(session.updatedAt)}`}</span></span>
+                    <span className="session-copy"><strong>{session.title}</strong><span>{session.openInCodex ? "正在电脑中打开 · 直接继续" : `${session.provider === "codex" ? "Codex" : "Claude Code"} · ${formatWhen(session.updatedAt)}`}</span></span>
                     {session.active || running[session.key] ? <i className="running-dot" /> : null}
                   </button>
                 ))}</div> : null}
@@ -529,10 +564,10 @@ export default function Home() {
         {selectedSummary ? (
           <>
             <header className="conversation-header">
-              <button className="back-button" type="button" onClick={() => setSelectedKey(null)}>‹</button>
+              <button className="back-button" type="button" onClick={() => setSelectedKey(null)} aria-label="返回项目列表">‹</button>
               <span className={`provider-mark ${selectedSummary.provider}`}>{selectedSummary.provider === "codex" ? "C" : "A"}</span>
-              <div className="conversation-title"><strong>{selectedSummary.title}</strong><span>{selectedSummary.currentWindow ? "电脑当前窗口 · 发送后会自动切到 Codex" : selectedSummary.cwd}</span></div>
-              {running[selectedSummary.key] ? <span className="header-running"><i />运行中</span> : null}
+              <div className="conversation-title"><strong>{selectedSummary.currentWindow ? "电脑当前任务" : selectedSummary.title}</strong><span>{selectedSummary.currentWindow ? "Codex · 与电脑实时同步" : selectedSummary.cwd}</span></div>
+              <span className={`sync-state ${device?.online ? "online" : ""}`}><i />{running[selectedSummary.key] === "waiting" ? "等待回复" : running[selectedSummary.key] ? "发送中" : device?.online ? "已连接" : "离线"}</span>
             </header>
             <div className="message-scroll">
               {!selectedDetail ? <div className="loading-conversation"><span /><span /><span /></div> : null}
@@ -540,20 +575,24 @@ export default function Home() {
                 <details className="tool-message" key={message.id}><summary>工具记录</summary><div><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div></details>
               ) : (
                 <article className={`message ${message.role}`} key={message.id}>
-                  <div className="message-label">{message.role === "user" ? "你" : selectedSummary.provider === "codex" ? "Codex" : "Claude"}</div>
-                  <div className="message-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
+                  <div className="message-avatar">{message.role === "user" ? "你" : selectedSummary.provider === "codex" ? "C" : "A"}</div>
+                  <div className="message-content">
+                    <div className="message-label"><b>{message.role === "user" ? "你" : selectedSummary.provider === "codex" ? "Codex" : "Claude"}</b>{formatMessageTime(message.timestamp) ? <time>{formatMessageTime(message.timestamp)}</time> : null}</div>
+                    <div className="message-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
+                  </div>
                 </article>
               ))}
-              {running[selectedSummary.key] ? <div className="thinking-line"><span /><p>{selectedSummary.currentWindow ? "正在发送到电脑窗口…" : "正在电脑上执行…"}</p></div> : null}
+              {running[selectedSummary.key] ? <div className="thinking-line"><span /><p>{running[selectedSummary.key] === "waiting" ? "Codex 正在电脑上思考，回答会自动出现在这里…" : selectedSummary.currentWindow ? "正在送达电脑当前窗口…" : "正在电脑上执行…"}</p></div> : null}
+              <div ref={messageEndRef} className="message-end" />
             </div>
             <form className="composer" onSubmit={submit}>
-              {!selectedSummary.currentWindow ? <><div className="background-target"><span><b>后台续聊</b> · 不会显示在电脑当前窗口</span>{currentWindow ? <button type="button" onClick={() => setSelectedKey(currentWindow.key)}>改发到当前输入框</button> : null}</div><div className="mode-switch"><button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>安全模式</button><button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>完全控制</button></div></> : <div className="window-target"><span>⌁</span>发送到电脑当前 Codex 输入框</div>}
-              <div className="composer-input"><textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder={selectedSummary.currentWindow ? "像坐在电脑前一样输入指令…" : "继续这个会话…"} /><button type="submit" disabled={!draft.trim() || sending || Boolean(running[selectedSummary.key])} aria-label="发送">↑</button></div>
-              <p>{selectedSummary.currentWindow ? "发送时电脑会短暂切到 Codex 并自动按下回车" : mode === "safe" ? "默认拒绝需要额外授权的操作" : "会绕过本机权限确认，请谨慎使用"}</p>
+              {!selectedSummary.currentWindow ? <><div className="background-target"><span><b>后台续聊</b><small>不会出现在电脑当前窗口</small></span>{currentWindow ? <button type="button" onClick={() => setSelectedKey(currentWindow.key)}>切到当前任务</button> : null}</div><div className="mode-switch"><button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>安全模式</button><button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>完全控制</button></div></> : <div className="window-target"><span>●</span>发送到电脑当前 Codex · 回答自动同步</div>}
+              <div className="composer-input"><textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder={running[selectedSummary.key] === "waiting" ? "正在等待 Codex 回复…" : selectedSummary.currentWindow ? "给 Codex 发一条指令…" : "继续这个对话…"} /><button type="submit" disabled={!draft.trim() || sending || Boolean(running[selectedSummary.key])} aria-label="发送">↑</button></div>
+              <p>{selectedSummary.currentWindow ? "电脑端的回答会在几秒内自动显示在这里" : mode === "safe" ? "默认拒绝需要额外授权的操作" : "会绕过本机权限确认，请谨慎使用"}</p>
             </form>
           </>
         ) : (
-          <div className="conversation-empty"><div className="empty-symbol">R</div><h2>选择一个项目继续</h2><p>你也可以打开“当前 Codex 窗口”，把手机输入直接发送到电脑上正在看的任务。</p><div className="empty-badges"><span>永久绑定</span><span>端到端加密</span><span>Codex</span><span>Claude Code</span></div></div>
+          <div className="conversation-empty"><div className="empty-symbol">R</div><h2>从电脑离开的地方继续</h2><p>选择一个项目对话，或者直接打开电脑当前任务。消息和回答都会在两端保持同步。</p><div className="empty-badges"><span>永久绑定</span><span>端到端加密</span><span>自动同步</span></div></div>
         )}
       </section>
       {toast ? <div className="toast" role="status">{toast}</div> : null}

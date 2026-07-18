@@ -3,7 +3,9 @@ param(
   [ValidatePattern("^https?://")]
   [string]$RelayUrl,
 
-  [string]$SiteToken = ""
+  [string]$SiteToken = "",
+
+  [switch]$NoControlPanel
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,8 +35,10 @@ Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
 )
 
 Start-Sleep -Seconds 2
-$controlArguments = @(".\agent\index.mjs", "control", "--relay", $relay)
-if ($SiteToken) {
-  $controlArguments += @("--site-token", $SiteToken)
+if (-not $NoControlPanel) {
+  $controlArguments = @(".\agent\index.mjs", "control", "--relay", $relay)
+  if ($SiteToken) {
+    $controlArguments += @("--site-token", $SiteToken)
+  }
+  & node @controlArguments
 }
-& node @controlArguments

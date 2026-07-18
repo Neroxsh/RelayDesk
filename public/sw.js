@@ -1,4 +1,4 @@
-const CACHE = "relaydesk-shell-v3";
+const CACHE = "relaydesk-shell-v4";
 const SHELL = ["/", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

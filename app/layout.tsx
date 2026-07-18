@@ -23,9 +23,9 @@ export async function generateMetadata(): Promise<Metadata> {
       url: origin,
       title,
       description,
-      images: [{ url: `${origin}/og.png`, width: 1536, height: 1024, alt: "RelayDesk 手机远程工作台" }],
+      images: [{ url: `${origin}/og-v3.png`, width: 1536, height: 1024, alt: "RelayDesk 手机远程工作台" }],
     },
-    twitter: { card: "summary_large_image", title, description, images: [`${origin}/og.png`] },
+    twitter: { card: "summary_large_image", title, description, images: [`${origin}/og-v3.png`] },
   };
 }
 
