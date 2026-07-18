@@ -1,7 +1,9 @@
 param(
   [Parameter(Mandatory = $true)]
   [ValidatePattern("^https?://")]
-  [string]$RelayUrl
+  [string]$RelayUrl,
+
+  [string]$SiteToken = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,7 +24,11 @@ $startupCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolic
 Set-ItemProperty -Path $runKey -Name "RelayDeskAgent" -Value $startupCommand
 
 Set-Location -LiteralPath $projectRoot
-& node ".\agent\index.mjs" pair --relay $relay
+$pairArguments = @(".\agent\index.mjs", "pair", "--relay", $relay)
+if ($SiteToken) {
+  $pairArguments += @("--site-token", $SiteToken)
+}
+& node @pairArguments
 
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
   "-NoProfile",

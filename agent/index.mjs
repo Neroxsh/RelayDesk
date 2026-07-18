@@ -33,6 +33,7 @@ async function loadConfig() {
     const config = {
       version: 1,
       relayUrl: "",
+      siteToken: "",
       deviceId: `device_${randomToken(12)}`,
       agentToken: randomToken(32),
       deviceName: os.hostname(),
@@ -54,6 +55,7 @@ async function request(config, pathname, options = {}) {
     ...options,
     headers: {
       "content-type": "application/json",
+      ...(config.siteToken ? { "OAI-Sites-Authorization": `Bearer ${config.siteToken}` } : {}),
       ...(options.auth === false ? {} : { authorization: `Bearer ${config.agentToken}` }),
       ...(options.headers ?? {}),
     },
@@ -256,6 +258,8 @@ async function main() {
     return;
   }
   config.relayUrl = relay;
+  const siteToken = argument("site-token") ?? process.env.RELAYDESK_SITE_TOKEN ?? config.siteToken;
+  if (siteToken) config.siteToken = siteToken;
   await saveConfig(config);
   await register(config);
 
