@@ -7,8 +7,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "RelayDesk — 随时接管 Codex 与 Claude Code";
-  const description = "永久绑定手机，按项目查看会话，并把指令直接发送到电脑当前 Codex 窗口。";
+  const title = "RelayDesk — Codex 与 Claude Code 远程工作台";
+  const description = "从手机继续电脑上的 Codex 与 Claude Code 会话。";
   return {
     metadataBase: new URL(origin),
     title,
@@ -23,9 +23,9 @@ export async function generateMetadata(): Promise<Metadata> {
       url: origin,
       title,
       description,
-      images: [{ url: `${origin}/og-v3.png`, width: 1536, height: 1024, alt: "RelayDesk 手机远程工作台" }],
+      images: [{ url: `${origin}/og-v4.png`, width: 1536, height: 1024, alt: "RelayDesk" }],
     },
-    twitter: { card: "summary_large_image", title, description, images: [`${origin}/og-v3.png`] },
+    twitter: { card: "summary_large_image", title, description, images: [`${origin}/og-v4.png`] },
   };
 }
 
