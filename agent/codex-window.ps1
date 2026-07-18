@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$PromptBase64,
-  [switch]$DryRun
+  [switch]$DryRun,
+  [switch]$ValidatePaste
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,22 +53,40 @@ try {
   [void][RelayDeskNative]::EnumChildWindows($app.MainWindowHandle, $callback, [IntPtr]::Zero)
   $automationHandle = if ($renderHandle -ne [IntPtr]::Zero) { $renderHandle } else { $app.MainWindowHandle }
   $root = [System.Windows.Automation.AutomationElement]::FromHandle($automationHandle)
-  $all = $root.FindAll(
-    [System.Windows.Automation.TreeScope]::Subtree,
-    [System.Windows.Automation.Condition]::TrueCondition
-  )
-  $document = $all | Where-Object {
-    $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and
-    $_.Current.Name -eq "Codex"
-  } | Select-Object -First 1
+  $document = $null
+  $composer = $null
+  $blockedByDraft = $false
+  $deadline = (Get-Date).AddSeconds(120)
+  do {
+    $all = $root.FindAll(
+      [System.Windows.Automation.TreeScope]::Subtree,
+      [System.Windows.Automation.Condition]::TrueCondition
+    )
+    $document = $all | Where-Object {
+      $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and
+      $_.Current.Name -eq "Codex"
+    } | Select-Object -First 1
+    $composer = $all | Where-Object {
+      $_.Current.ClassName -like "ProseMirror*" -and
+      $_.Current.IsKeyboardFocusable -and
+      -not $_.Current.IsOffscreen
+    } | Sort-Object { $_.Current.BoundingRectangle.Y } -Descending | Select-Object -First 1
+    if ($composer -and -not $DryRun) {
+      $composerTextPattern = $composer.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+      $existingDraft = $composerTextPattern.DocumentRange.GetText(4096).Trim()
+      if ($existingDraft) {
+        $blockedByDraft = $true
+        $composer = $null
+      }
+    }
+    if ($document -and $composer) { break }
+    Start-Sleep -Milliseconds 500
+  } while ((Get-Date) -lt $deadline)
   if (-not $document) { throw "The current window is not Codex" }
-
-  $composer = $all | Where-Object {
-    $_.Current.ClassName -eq "ProseMirror" -and
-    $_.Current.IsKeyboardFocusable -and
-    -not $_.Current.IsOffscreen
-  } | Sort-Object { $_.Current.BoundingRectangle.Y } -Descending | Select-Object -First 1
-  if (-not $composer) { throw "The current Codex composer was not found" }
+  if (-not $composer) {
+    if ($blockedByDraft) { throw "Codex has unsent text in its composer; the remote message was not mixed into it" }
+    throw "Codex is still busy and its composer is unavailable"
+  }
   if ($DryRun) {
     $bounds = $composer.Current.BoundingRectangle
     [PSCustomObject]@{ ok = $true; window = "Codex"; composer = "ProseMirror"; width = [int]$bounds.Width; height = [int]$bounds.Height } | ConvertTo-Json -Compress
@@ -93,7 +112,15 @@ try {
     [System.Windows.Forms.Clipboard]::SetText($prompt)
     [System.Windows.Forms.SendKeys]::SendWait("^v")
     Start-Sleep -Milliseconds 180
-    [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+    if ($ValidatePaste) {
+      $textPattern = $composer.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+      $visibleText = $textPattern.DocumentRange.GetText(4096)
+      if (-not $visibleText.Contains($prompt)) { throw "Codex did not receive the pasted text" }
+      [System.Windows.Forms.SendKeys]::SendWait("^a")
+      [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
+    } else {
+      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+    }
     Start-Sleep -Milliseconds 160
   } finally {
     if ($null -ne $savedClipboard) {
@@ -105,7 +132,7 @@ try {
       [void][RelayDeskNative]::AttachThreadInput($currentThread, $targetThread, $false)
     }
   }
-  [PSCustomObject]@{ ok = $true; window = "Codex" } | ConvertTo-Json -Compress
+  [PSCustomObject]@{ ok = $true; window = "Codex"; pasteValidated = [bool]$ValidatePaste } | ConvertTo-Json -Compress
 } catch {
   [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
   exit 1

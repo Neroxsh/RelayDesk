@@ -31,17 +31,23 @@ test("the product ships permanent pairing, projects, and both provider surfaces"
 });
 
 test("the desktop bridge never exposes an arbitrary shell command endpoint", async () => {
-  const agent = await readFile(new URL("../agent/index.mjs", import.meta.url), "utf8");
+  const [agent, providers] = await Promise.all([
+    readFile(new URL("../agent/index.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../agent/providers.mjs", import.meta.url), "utf8"),
+  ]);
   assert.doesNotMatch(agent, /payload\?\.type === ["']shell/);
   assert.match(agent, /payload\?\.type === "session:send"/);
   assert.match(agent, /prompt\.length > 12_000/);
   assert.match(agent, /message\.kind === "pair_request"/);
+  assert.match(providers, /CommandType -eq 'Application'.*'\*\.cmd'/);
+  assert.match(providers, /void completed\.catch/);
 });
 
 test("current-window injection is restricted to the Codex composer", async () => {
   const script = await readFile(new URL("../agent/codex-window.ps1", import.meta.url), "utf8");
   assert.match(script, /Chrome_RenderWidgetHostHWND/);
   assert.match(script, /Current\.Name -eq "Codex"/);
-  assert.match(script, /Current\.ClassName -eq "ProseMirror"/);
+  assert.match(script, /Current\.ClassName -like "ProseMirror\*"/);
+  assert.match(script, /unsent text in its composer/);
   assert.match(script, /SendWait\("\{ENTER\}"\)/);
 });

@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 const CODEX_WINDOW_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-window.ps1");
 
 function resolveOnWindows(name) {
-  const script = `$c=Get-Command ${name} -ErrorAction Stop | Select-Object -First 1; $c.Source`;
+  const script = `$all=Get-Command ${name} -All -ErrorAction Stop; ` +
+    `$c=$all | Where-Object { $_.CommandType -eq 'Application' -and $_.Source -like '*.cmd' } | Select-Object -First 1; ` +
+    `if(-not $c){$c=$all | Where-Object { $_.CommandType -eq 'Application' -and $_.Source -like '*.exe' } | Select-Object -First 1}; ` +
+    `if(-not $c){$c=$all | Select-Object -First 1}; $c.Source`;
   const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", script], {
     encoding: "utf8",
     windowsHide: true,
@@ -20,6 +23,12 @@ function providerExecutable(provider) {
   if (process.platform !== "win32") return { command: name, prefix: [] };
   const found = resolveOnWindows(name);
   if (!found) throw new Error(`没有找到 ${name}，请先在电脑上安装并登录`);
+  if (path.extname(found).toLowerCase() === ".cmd") {
+    return {
+      command: "cmd.exe",
+      prefix: ["/d", "/s", "/c", found],
+    };
+  }
   if (path.extname(found).toLowerCase() === ".ps1") {
     return {
       command: "powershell.exe",
@@ -116,6 +125,7 @@ export function sendPrompt(session, prompt, mode, onEvent) {
       else reject(new Error(stderrBuffer.trim() || `${session.provider} 已退出（${code ?? signal}）`));
     });
   });
+  void completed.catch(() => undefined);
 
   return {
     pid: child.pid,
@@ -161,6 +171,7 @@ export function sendToCurrentCodex(prompt) {
       else reject(new Error(result?.error ?? stderr.trim() ?? "无法把指令发送到当前 Codex 窗口"));
     });
   });
+  void completed.catch(() => undefined);
   return {
     pid: child.pid,
     completed,

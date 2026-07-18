@@ -190,7 +190,11 @@ async function publicSessions() {
   const source = await listSessions();
   const latestCodex = source.find((session) => session.provider === "codex");
   const sessions = source.map((session) => {
-    const result = { ...session, active: activeRuns.has(session.key) };
+    const result = {
+      ...session,
+      active: activeRuns.has(session.key),
+      openInCodex: session.provider === "codex" && session.id === latestCodex?.id,
+    };
     delete result.filePath;
     return result;
   });

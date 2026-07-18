@@ -27,6 +27,7 @@ type SessionSummary = {
   recent?: boolean;
   active?: boolean;
   currentWindow?: boolean;
+  openInCodex?: boolean;
 };
 type Message = {
   id: string;
@@ -266,6 +267,7 @@ export default function Home() {
   const cursorRef = useRef(0);
   const keyRef = useRef<CryptoKey | null>(null);
   const pairingRef = useRef<StoredPairing | null>(null);
+  const optimisticRef = useRef(new Map<string, { sessionKey: string; messageId: string }>());
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -301,6 +303,16 @@ export default function Home() {
   }, []);
 
   const handlePayload = useCallback((payload: RemotePayload) => {
+    const rollbackOptimistic = (remoteRequestId: string | undefined) => {
+      if (!remoteRequestId) return;
+      const optimistic = optimisticRef.current.get(remoteRequestId);
+      if (!optimistic) return;
+      setLiveMessages((value) => ({
+        ...value,
+        [optimistic.sessionKey]: (value[optimistic.sessionKey] ?? []).filter((message) => message.id !== optimistic.messageId),
+      }));
+      optimisticRef.current.delete(remoteRequestId);
+    };
     if (payload.type === "sessions:snapshot" && Array.isArray(payload.sessions)) {
       setSessions(payload.sessions as SessionSummary[]);
       return;
@@ -330,10 +342,17 @@ export default function Home() {
         else next[key] = status;
         return next;
       });
+      if (status === "failed") {
+        rollbackOptimistic(payload.requestId);
+        setToast(String(payload.error ?? "电脑端执行失败"));
+      } else if (["completed", "submitted"].includes(status) && payload.requestId) {
+        optimisticRef.current.delete(payload.requestId);
+      }
       if (status === "submitted") setToast("已发送到电脑当前 Codex 窗口");
       return;
     }
     if (payload.type === "request:error") {
+      rollbackOptimistic(payload.requestId);
       setToast(String(payload.error ?? "请求失败"));
       setRunning({});
     }
@@ -419,12 +438,15 @@ export default function Home() {
     if (!selectedSummary || !draft.trim() || sending) return;
     if (!selectedSummary.currentWindow && mode === "full" && !window.confirm("完全控制会绕过本机权限确认。确定继续吗？")) return;
     const prompt = draft.trim();
+    const remoteRequestId = requestId();
+    const optimisticId = `local-${Date.now()}`;
     setSending(true);
     setDraft("");
     setLiveMessages((value) => ({
       ...value,
-      [selectedSummary.key]: [...(value[selectedSummary.key] ?? []), { id: `local-${Date.now()}`, role: "user", content: prompt }],
+      [selectedSummary.key]: [...(value[selectedSummary.key] ?? []), { id: optimisticId, role: "user", content: prompt }],
     }));
+    optimisticRef.current.set(remoteRequestId, { sessionKey: selectedSummary.key, messageId: optimisticId });
     try {
       await remoteSend({
         type: "session:send",
@@ -432,9 +454,17 @@ export default function Home() {
         sessionId: selectedSummary.id,
         prompt,
         mode,
-        requestId: requestId(),
+        requestId: remoteRequestId,
       });
     } catch (error) {
+      const optimistic = optimisticRef.current.get(remoteRequestId);
+      if (optimistic) {
+        setLiveMessages((value) => ({
+          ...value,
+          [optimistic.sessionKey]: (value[optimistic.sessionKey] ?? []).filter((message) => message.id !== optimistic.messageId),
+        }));
+        optimisticRef.current.delete(remoteRequestId);
+      }
       setToast(error instanceof Error ? error.message : "发送失败");
     } finally {
       setSending(false);
@@ -468,7 +498,7 @@ export default function Home() {
         <div className="device-card"><span className={`status-pulse ${device?.online ? "online" : ""}`} /><div><strong>{device?.name ?? pairing.device.name}</strong><span>{device?.online ? "电脑在线 · 实时同步" : "等待电脑上线"}</span></div><button className="refresh-button" type="button" onClick={() => void remoteSend({ type: "sessions:list", requestId: requestId() })}>↻</button></div>
         {currentWindow ? (
           <button className={`current-window ${selectedKey === currentWindow.key ? "selected" : ""}`} type="button" onClick={() => setSelectedKey(currentWindow.key)}>
-            <span className="live-window-icon">⌁</span><span><b>当前 Codex 窗口</b><small>直接输入到电脑当前任务</small></span><i className="online-pin" />
+            <span className="live-window-icon">⌁</span><span><b>电脑当前输入框 · 推荐</b><small>直接填入并发送到当前 Codex</small></span><i className="online-pin" />
           </button>
         ) : null}
         <label className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目或会话" /></label>
@@ -482,9 +512,9 @@ export default function Home() {
                   <span className="folder-icon">⌑</span><span><strong>{project.name}</strong><small>{project.path}</small></span><i>{isCollapsed ? "›" : "⌄"}</i>
                 </button>
                 {!isCollapsed ? <div className="project-sessions">{project.sessions.map((session) => (
-                  <button className={`session-row ${selectedKey === session.key ? "selected" : ""}`} type="button" key={session.key} onClick={() => setSelectedKey(session.key)}>
+                  <button className={`session-row ${selectedKey === session.key ? "selected" : ""}`} type="button" key={session.key} onClick={() => setSelectedKey(session.openInCodex && currentWindow ? currentWindow.key : session.key)}>
                     <span className={`provider-mark ${session.provider}`}>{session.provider === "codex" ? "C" : "A"}</span>
-                    <span className="session-copy"><strong>{session.title}</strong><span>{session.provider === "codex" ? "Codex" : "Claude Code"} · {formatWhen(session.updatedAt)}</span></span>
+                    <span className="session-copy"><strong>{session.title}</strong><span>{session.openInCodex ? "电脑当前已打开 · 点击将直接发送" : `${session.provider === "codex" ? "Codex" : "Claude Code"} · ${formatWhen(session.updatedAt)}`}</span></span>
                     {session.active || running[session.key] ? <i className="running-dot" /> : null}
                   </button>
                 ))}</div> : null}
@@ -517,7 +547,7 @@ export default function Home() {
               {running[selectedSummary.key] ? <div className="thinking-line"><span /><p>{selectedSummary.currentWindow ? "正在发送到电脑窗口…" : "正在电脑上执行…"}</p></div> : null}
             </div>
             <form className="composer" onSubmit={submit}>
-              {!selectedSummary.currentWindow ? <div className="mode-switch"><button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>安全模式</button><button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>完全控制</button></div> : <div className="window-target"><span>⌁</span>发送到电脑当前 Codex 输入框</div>}
+              {!selectedSummary.currentWindow ? <><div className="background-target"><span><b>后台续聊</b> · 不会显示在电脑当前窗口</span>{currentWindow ? <button type="button" onClick={() => setSelectedKey(currentWindow.key)}>改发到当前输入框</button> : null}</div><div className="mode-switch"><button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>安全模式</button><button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>完全控制</button></div></> : <div className="window-target"><span>⌁</span>发送到电脑当前 Codex 输入框</div>}
               <div className="composer-input"><textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder={selectedSummary.currentWindow ? "像坐在电脑前一样输入指令…" : "继续这个会话…"} /><button type="submit" disabled={!draft.trim() || sending || Boolean(running[selectedSummary.key])} aria-label="发送">↑</button></div>
               <p>{selectedSummary.currentWindow ? "发送时电脑会短暂切到 Codex 并自动按下回车" : mode === "safe" ? "默认拒绝需要额外授权的操作" : "会绕过本机权限确认，请谨慎使用"}</p>
             </form>
