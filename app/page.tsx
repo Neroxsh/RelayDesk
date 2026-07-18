@@ -59,6 +59,11 @@ type PollResponse = {
   messages?: Array<{ id: number; kind: string; envelope: string }>;
 };
 
+const PROVIDERS: Record<Provider, { name: string; short: string; description: string }> = {
+  codex: { name: "Codex", short: "C", description: "OpenAI" },
+  claude: { name: "Claude Code", short: "Cl", description: "Anthropic" },
+};
+
 const STORAGE_KEY = "relaydesk.pairing.v2";
 const LEGACY_STORAGE_KEY = "relaydesk.pairing.v1";
 const PENDING_KEY = "relaydesk.pending.v2";
@@ -93,6 +98,10 @@ function phoneName() {
   if (/iPad/i.test(value)) return "iPad";
   if (/Android/i.test(value)) return "Android 手机";
   return "手机浏览器";
+}
+
+function providerName(provider: Provider) {
+  return PROVIDERS[provider].name;
 }
 
 function PairScreen({ onPaired }: { onPaired: (pairing: StoredPairing) => void }) {
@@ -215,22 +224,24 @@ function PairScreen({ onPaired }: { onPaired: (pairing: StoredPairing) => void }
     <main className="pair-shell">
       <section className="pair-card" aria-labelledby="pair-title">
         <div className="brand-mark" aria-hidden="true"><span>R</span></div>
-        <p className="eyebrow">RelayDesk · 私人远程工作台</p>
+        <p className="eyebrow">RelayDesk</p>
         {pending ? (
           <div className="approval-state">
             <div className="approval-icon"><span /></div>
-            <h1 id="pair-title">请在电脑上确认</h1>
-            <p>已向 <strong>{pending.deviceName}</strong> 发送永久绑定请求。电脑控制中心会自动打开。</p>
-            <div className="approval-steps"><span>1</span><b>找到“等待确认”</b><i /><span>2</span><b>点击“确认绑定”</b></div>
+            <span className="pair-kicker">连接请求已发送</span>
+            <h1 id="pair-title">在电脑上确认</h1>
+            <p>打开 <strong>{pending.deviceName}</strong> 上的 RelayDesk，确认这台手机。</p>
+            <div className="approval-steps"><span className="approval-pulse" /><b>等待电脑确认</b><i>10 分钟内有效</i></div>
             {error ? <p className="form-error">{error}</p> : null}
-            <button className="text-button" type="button" onClick={cancelPending}>取消并重新输入</button>
+            <button className="text-button" type="button" onClick={cancelPending}>换一个连接码</button>
           </div>
         ) : (
           <>
-            <h1 id="pair-title">把电脑上的 Codex，装进口袋。</h1>
-            <p className="pair-lead">输入电脑控制中心显示的永久连接密钥。只需一次，确认后不再登录、不再重复认证。</p>
+            <span className="pair-kicker">Remote workspace</span>
+            <h1 id="pair-title">连接你的电脑</h1>
+            <p className="pair-lead">输入电脑端显示的 16 位连接码。</p>
             <form onSubmit={requestPair} className="pair-form">
-              <label htmlFor="pair-key">永久连接密钥</label>
+              <label htmlFor="pair-key">连接码</label>
               <input
                 id="pair-key"
                 inputMode="text"
@@ -244,14 +255,14 @@ function PairScreen({ onPaired }: { onPaired: (pairing: StoredPairing) => void }
               />
               {error ? <p className="form-error">{error}</p> : null}
               <button type="submit" disabled={normalizePairKey(keyText).length !== 16 || working}>
-                {working ? "正在联系电脑…" : "请求连接这台电脑"}
+                {working ? "正在连接…" : "继续"}
               </button>
             </form>
-            <div className="security-note"><span>●</span><div><strong>电脑确认后永久绑定</strong><p>中继只看到密文；连接密钥明文只保存在你的电脑和输入它的手机上。</p></div></div>
+            <div className="security-note"><span>✓</span><div><strong>这台手机会保持连接</strong><p>可随时在电脑端移除。</p></div></div>
           </>
         )}
       </section>
-      <p className="pair-foot">无需 ChatGPT 账号 · 无需开放电脑公网端口</p>
+      <p className="pair-foot"><span /> 端到端加密</p>
     </main>
   );
 }
@@ -263,6 +274,7 @@ export default function Home() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [details, setDetails] = useState<Record<string, SessionDetail>>({});
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [activeProvider, setActiveProvider] = useState<Provider>("codex");
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<"safe" | "full">("safe");
@@ -340,7 +352,7 @@ export default function Home() {
             delete next[session.key];
             return next;
           });
-          setToast("Codex 已回复 · 内容已自动同步");
+          setToast(`${providerName(session.provider)} 已回复`);
         }
       }
       return;
@@ -372,7 +384,7 @@ export default function Home() {
         optimisticRef.current.delete(payload.requestId);
       }
       if (status === "completed") waitingForReplyRef.current.delete(key);
-      if (status === "submitted") setToast("已送达电脑 · 等待 Codex 回复");
+      if (status === "submitted") setToast("电脑已接收");
       return;
     }
     if (payload.type === "request:error") {
@@ -436,9 +448,13 @@ export default function Home() {
   }, [toast]);
 
   const currentWindow = sessions.find((session) => session.currentWindow);
+  const providerCounts = useMemo(() => ({
+    codex: sessions.filter((session) => session.provider === "codex" && !session.currentWindow).length,
+    claude: sessions.filter((session) => session.provider === "claude").length,
+  }), [sessions]);
   const projectGroups = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const matches = sessions.filter((session) => !session.currentWindow).filter((session) => {
+    const matches = sessions.filter((session) => !session.currentWindow && session.provider === activeProvider).filter((session) => {
       if (!needle) return true;
       return `${session.title} ${session.cwd} ${session.provider}`.toLowerCase().includes(needle);
     });
@@ -451,7 +467,7 @@ export default function Home() {
       map.set(path, group);
     }
     return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [sessions, query]);
+  }, [sessions, query, activeProvider]);
 
   const selectedSummary = sessions.find((session) => session.key === selectedKey) ?? null;
   const selectedDetail = selectedKey ? details[selectedKey] : null;
@@ -466,7 +482,7 @@ export default function Home() {
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!selectedSummary || !draft.trim() || sending) return;
-    if (!selectedSummary.currentWindow && mode === "full" && !window.confirm("完全控制会绕过本机权限确认。确定继续吗？")) return;
+    if (!selectedSummary.currentWindow && mode === "full" && !window.confirm("“放开权限”会跳过电脑端确认。继续？")) return;
     const prompt = draft.trim();
     const remoteRequestId = requestId();
     const optimisticId = `local-${remoteRequestId}`;
@@ -514,49 +530,84 @@ export default function Home() {
   }
 
   function forgetPhone() {
-    if (!window.confirm("只清除此手机保存的绑定？电脑端仍会保留记录，可在电脑控制中心彻底解除。")) return;
+    if (!window.confirm("从这台手机移除 RelayDesk？")) return;
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(LEGACY_STORAGE_KEY);
     setPairing(null);
+  }
+
+  function switchProvider(provider: Provider) {
+    setActiveProvider(provider);
+    setSelectedKey(null);
+    setQuery("");
   }
 
   if (!hydrated) return <main className="loading-shell"><div className="loading-mark">R</div></main>;
   if (!pairing) return <PairScreen onPaired={setPairing} />;
 
   return (
-    <main className={`app-shell ${selectedKey ? "has-selection" : ""}`}>
+    <main className={`app-shell ${selectedKey ? "has-selection" : ""}`} data-provider={activeProvider}>
+      <aside className="provider-rail" aria-label="工作区">
+        <div className="rail-brand" aria-label="RelayDesk">R</div>
+        <nav className="provider-switcher" aria-label="选择工具">
+          {(["codex", "claude"] as Provider[]).map((provider) => (
+            <button className={`provider-switch ${provider} ${activeProvider === provider ? "active" : ""}`} type="button" key={provider} onClick={() => switchProvider(provider)} aria-pressed={activeProvider === provider}>
+              <span>{PROVIDERS[provider].short}</span>
+              <em>{provider === "codex" ? "Codex" : "Claude"}</em>
+              <i>{providerCounts[provider]}</i>
+            </button>
+          ))}
+        </nav>
+        <div className="rail-footer">
+          <span className={`rail-online ${device?.online ? "online" : ""}`} title={device?.online ? "电脑在线" : "电脑离线"} />
+          <button type="button" onClick={forgetPhone} title="移除此手机" aria-label="移除此手机">···</button>
+        </div>
+      </aside>
+
       <aside className="session-panel">
         <header className="panel-header">
-          <div className="brand-lockup"><div className="brand-mark brand-mark-small"><span>R</span></div><div><strong>RelayDesk</strong><span>你的远程 AI 工作台</span></div></div>
-          <button className="icon-button" type="button" onClick={forgetPhone} title="管理此手机的连接" aria-label="管理此手机的连接">•••</button>
+          <div className="workspace-title"><span>{PROVIDERS[activeProvider].short}</span><div><strong>{providerName(activeProvider)}</strong><small>{PROVIDERS[activeProvider].description}</small></div></div>
+          <span className={`device-state ${device?.online ? "online" : ""}`}><i />{device?.online ? "在线" : "离线"}</span>
         </header>
-        <div className="device-card"><span className={`status-pulse ${device?.online ? "online" : ""}`} /><div><strong>{device?.name ?? pairing.device.name}</strong><span>{device?.online ? "在线 · 回答自动同步" : "离线 · 等待电脑上线"}</span></div><button className="refresh-button" type="button" title="立即同步" aria-label="立即同步" onClick={() => void remoteSend({ type: "sessions:list", requestId: requestId() })}>↻</button></div>
-        {currentWindow ? (
+
+        <div className="device-card">
+          <div className="device-copy"><span className="device-glyph">⌁</span><span><strong>{device?.name ?? pairing.device.name}</strong><small>{device?.online ? "已连接" : "等待电脑"}</small></span></div>
+          <button className="refresh-button" type="button" title="同步" aria-label="同步" onClick={() => void remoteSend({ type: "sessions:list", requestId: requestId() })}>↻</button>
+        </div>
+
+        {activeProvider === "codex" && currentWindow ? (
           <button className={`current-window ${selectedKey === currentWindow.key ? "selected" : ""}`} type="button" onClick={() => setSelectedKey(currentWindow.key)}>
-            <span className="live-window-icon">›_</span><span><b>继续电脑当前任务</b><small>发送到当前 Codex · 回答自动回来</small></span><i className="online-pin" />
+            <span className="live-window-icon">›_</span>
+            <span><b>当前 Codex</b><small>电脑前台</small></span>
+            <i className="live-badge">LIVE</i>
           </button>
         ) : null}
-        <label className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目或对话" /></label>
-        <div className="project-heading"><span>项目与对话</span><b>{projectGroups.length} 个项目</b></div>
-        <nav className="project-list" aria-label="项目和会话">
+
+        <label className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索 ${providerName(activeProvider)}`} /></label>
+        <div className="project-heading"><span>项目</span><b>{projectGroups.length}</b></div>
+        <nav className="project-list" aria-label={`${providerName(activeProvider)} 项目和会话`}>
           {projectGroups.map((project) => {
-            const isCollapsed = collapsed[project.path];
+            const collapseKey = `${activeProvider}:${project.path}`;
+            const isCollapsed = collapsed[collapseKey];
             return (
-              <section className="project-group" key={project.path}>
-                <button className="project-row" type="button" onClick={() => setCollapsed((value) => ({ ...value, [project.path]: !value[project.path] }))}>
-                  <span className="folder-icon">⌑</span><span><strong>{project.name}</strong><small>{project.sessions.length} 个对话 · {project.path}</small></span><i>{isCollapsed ? "›" : "⌄"}</i>
+              <section className="project-group" key={collapseKey}>
+                <button className="project-row" type="button" onClick={() => setCollapsed((value) => ({ ...value, [collapseKey]: !value[collapseKey] }))}>
+                  <span className="folder-icon">⌑</span>
+                  <span><strong>{project.name}</strong><small>{project.path}</small></span>
+                  <i className="project-count">{project.sessions.length}</i>
+                  <i className="project-chevron">{isCollapsed ? "›" : "⌄"}</i>
                 </button>
                 {!isCollapsed ? <div className="project-sessions">{project.sessions.map((session) => (
                   <button className={`session-row ${selectedKey === session.key ? "selected" : ""}`} type="button" key={session.key} onClick={() => setSelectedKey(session.openInCodex && currentWindow ? currentWindow.key : session.key)}>
-                    <span className={`provider-mark ${session.provider}`}>{session.provider === "codex" ? "C" : "A"}</span>
-                    <span className="session-copy"><strong>{session.title}</strong><span>{session.openInCodex ? "正在电脑中打开 · 直接继续" : `${session.provider === "codex" ? "Codex" : "Claude Code"} · ${formatWhen(session.updatedAt)}`}</span></span>
+                    <span className="session-track" />
+                    <span className="session-copy"><strong>{session.title}</strong><span>{session.openInCodex ? "电脑前台" : formatWhen(session.updatedAt)}</span></span>
                     {session.active || running[session.key] ? <i className="running-dot" /> : null}
                   </button>
                 ))}</div> : null}
               </section>
             );
           })}
-          {!projectGroups.length ? <div className="empty-list"><span>⌕</span><p>没有找到匹配的项目或会话</p></div> : null}
+          {!projectGroups.length ? <div className="empty-list"><span>—</span><p>{query ? "没有匹配结果" : `还没有 ${providerName(activeProvider)} 会话`}</p></div> : null}
         </nav>
       </aside>
 
@@ -565,34 +616,48 @@ export default function Home() {
           <>
             <header className="conversation-header">
               <button className="back-button" type="button" onClick={() => setSelectedKey(null)} aria-label="返回项目列表">‹</button>
-              <span className={`provider-mark ${selectedSummary.provider}`}>{selectedSummary.provider === "codex" ? "C" : "A"}</span>
-              <div className="conversation-title"><strong>{selectedSummary.currentWindow ? "电脑当前任务" : selectedSummary.title}</strong><span>{selectedSummary.currentWindow ? "Codex · 与电脑实时同步" : selectedSummary.cwd}</span></div>
-              <span className={`sync-state ${device?.online ? "online" : ""}`}><i />{running[selectedSummary.key] === "waiting" ? "等待回复" : running[selectedSummary.key] ? "发送中" : device?.online ? "已连接" : "离线"}</span>
+              <span className={`provider-mark ${selectedSummary.provider}`}>{PROVIDERS[selectedSummary.provider].short}</span>
+              <div className="conversation-title"><strong>{selectedSummary.currentWindow ? "当前 Codex" : selectedSummary.title}</strong><span>{selectedSummary.currentWindow ? "电脑前台" : selectedSummary.cwd}</span></div>
+              <span className={`sync-state ${device?.online ? "online" : ""}`}><i />{running[selectedSummary.key] === "waiting" ? "等回复" : running[selectedSummary.key] ? "执行中" : device?.online ? "已连接" : "离线"}</span>
             </header>
+
             <div className="message-scroll">
               {!selectedDetail ? <div className="loading-conversation"><span /><span /><span /></div> : null}
               {messages.map((message) => message.role === "tool" ? (
-                <details className="tool-message" key={message.id}><summary>工具记录</summary><div><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div></details>
+                <details className="tool-message" key={message.id}><summary><span>⌘</span>运行记录</summary><div><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div></details>
               ) : (
                 <article className={`message ${message.role}`} key={message.id}>
-                  <div className="message-avatar">{message.role === "user" ? "你" : selectedSummary.provider === "codex" ? "C" : "A"}</div>
+                  <div className="message-avatar">{message.role === "user" ? "你" : PROVIDERS[selectedSummary.provider].short}</div>
                   <div className="message-content">
-                    <div className="message-label"><b>{message.role === "user" ? "你" : selectedSummary.provider === "codex" ? "Codex" : "Claude"}</b>{formatMessageTime(message.timestamp) ? <time>{formatMessageTime(message.timestamp)}</time> : null}</div>
+                    <div className="message-label"><b>{message.role === "user" ? "你" : providerName(selectedSummary.provider)}</b>{formatMessageTime(message.timestamp) ? <time>{formatMessageTime(message.timestamp)}</time> : null}</div>
                     <div className="message-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                   </div>
                 </article>
               ))}
-              {running[selectedSummary.key] ? <div className="thinking-line"><span /><p>{running[selectedSummary.key] === "waiting" ? "Codex 正在电脑上思考，回答会自动出现在这里…" : selectedSummary.currentWindow ? "正在送达电脑当前窗口…" : "正在电脑上执行…"}</p></div> : null}
+              {running[selectedSummary.key] ? <div className="thinking-line"><span /><p>{running[selectedSummary.key] === "waiting" ? `${providerName(selectedSummary.provider)} 正在处理` : selectedSummary.currentWindow ? "发送到电脑" : "正在运行"}</p></div> : null}
               <div ref={messageEndRef} className="message-end" />
             </div>
+
             <form className="composer" onSubmit={submit}>
-              {!selectedSummary.currentWindow ? <><div className="background-target"><span><b>后台续聊</b><small>不会出现在电脑当前窗口</small></span>{currentWindow ? <button type="button" onClick={() => setSelectedKey(currentWindow.key)}>切到当前任务</button> : null}</div><div className="mode-switch"><button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>安全模式</button><button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>完全控制</button></div></> : <div className="window-target"><span>●</span>发送到电脑当前 Codex · 回答自动同步</div>}
-              <div className="composer-input"><textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder={running[selectedSummary.key] === "waiting" ? "正在等待 Codex 回复…" : selectedSummary.currentWindow ? "给 Codex 发一条指令…" : "继续这个对话…"} /><button type="submit" disabled={!draft.trim() || sending || Boolean(running[selectedSummary.key])} aria-label="发送">↑</button></div>
-              <p>{selectedSummary.currentWindow ? "电脑端的回答会在几秒内自动显示在这里" : mode === "safe" ? "默认拒绝需要额外授权的操作" : "会绕过本机权限确认，请谨慎使用"}</p>
+              <div className="composer-meta">
+                {selectedSummary.currentWindow ? (
+                  <span className="window-target"><i />电脑前台</span>
+                ) : (
+                  <><span className="background-target"><i />后台会话</span><div className="mode-switch"><button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>受控</button><button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>放开权限</button></div></>
+                )}
+              </div>
+              <div className="composer-input"><textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder={running[selectedSummary.key] === "waiting" ? "等待回复" : `给 ${providerName(selectedSummary.provider)} 发消息`} /><button type="submit" disabled={!draft.trim() || sending || Boolean(running[selectedSummary.key])} aria-label="发送">↗</button></div>
+              <p>Enter 发送 · Shift + Enter 换行</p>
             </form>
           </>
         ) : (
-          <div className="conversation-empty"><div className="empty-symbol">R</div><h2>从电脑离开的地方继续</h2><p>选择一个项目对话，或者直接打开电脑当前任务。消息和回答都会在两端保持同步。</p><div className="empty-badges"><span>永久绑定</span><span>端到端加密</span><span>自动同步</span></div></div>
+          <div className="conversation-empty">
+            <div className={`empty-provider ${activeProvider}`}>{PROVIDERS[activeProvider].short}</div>
+            <span>{PROVIDERS[activeProvider].description}</span>
+            <h2>{providerName(activeProvider)}</h2>
+            <p>从左侧选择一个项目。</p>
+            {activeProvider === "codex" && currentWindow ? <button type="button" onClick={() => setSelectedKey(currentWindow.key)}>打开当前 Codex <i>↗</i></button> : null}
+          </div>
         )}
       </section>
       {toast ? <div className="toast" role="status">{toast}</div> : null}

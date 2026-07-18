@@ -13,19 +13,20 @@ test("desktop and phone derive the same end-to-end key", async () => {
   assert.deepEqual(await decryptJson(desktopKey, envelope), { type: "sessions:list", requestId: "test" });
 });
 
-test("the product ships permanent pairing, projects, and both provider surfaces", async () => {
+test("the product ships pairing, project navigation, and separate provider workspaces", async () => {
   const [page, manifest, migration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0002_cuddly_mephistopheles.sql", import.meta.url), "utf8"),
   ]);
-  assert.match(page, /永久连接密钥/);
-  assert.match(page, /电脑当前任务/);
-  assert.match(page, /回答自动同步/);
+  assert.match(page, /16 位连接码/);
+  assert.match(page, /当前 Codex/);
+  assert.match(page, /电脑前台/);
   assert.match(page, /项目/);
   assert.match(page, /Codex/);
-  assert.match(page, /Claude/);
-  assert.match(page, /完全控制/);
+  assert.match(page, /Claude Code/);
+  assert.match(page, /activeProvider/);
+  assert.match(page, /放开权限/);
   assert.equal(JSON.parse(manifest).display, "standalone");
   assert.match(migration, /pending_pairs/);
   assert.match(migration, /pair_key_hash/);

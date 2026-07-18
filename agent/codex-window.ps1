@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$PromptBase64,
   [switch]$DryRun,
-  [switch]$ValidatePaste
+  [switch]$ValidatePaste,
+  [switch]$StashDraft
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,32 @@ try {
   $prompt = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($PromptBase64))
   if ([string]::IsNullOrWhiteSpace($prompt)) { throw "Prompt is empty" }
 
+  function Get-ComposerText($element) {
+    $pattern = $element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+    $text = $pattern.DocumentRange.GetText(4096).Trim()
+    $textBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
+    if ($textBase64 -in @(
+      "6KaB5rGC5ZCO57ut5Y+Y5pu0",
+      "UmVxdWVzdCBmb2xsb3ctdXAgY2hhbmdlcw==",
+      "UmVxdWVzdCBjaGFuZ2Vz",
+      "57uZIENvZGV4IOWPkeS4gOadoeaMh+S7pOKApg==",
+      "57uZIENvZGV4IOWPkeS4gOadoeaMh+S7pC4uLg==",
+      "QXNrIENvZGV4"
+    )) { return "" }
+    return $text
+  }
+
+  function Invoke-ClipboardRetry([scriptblock]$Action) {
+    $lastError = $null
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+      try { return (& $Action) } catch {
+        $lastError = $_
+        Start-Sleep -Milliseconds 100
+      }
+    }
+    throw $lastError
+  }
+
   $app = Get-Process -Name "ChatGPT" -ErrorAction SilentlyContinue |
     Where-Object { $_.MainWindowHandle -ne 0 } |
     Select-Object -First 1
@@ -56,6 +83,8 @@ try {
   $document = $null
   $composer = $null
   $blockedByDraft = $false
+  $busy = $false
+  $draftLength = 0
   $deadline = (Get-Date).AddSeconds(120)
   do {
     $all = $root.FindAll(
@@ -71,13 +100,22 @@ try {
       $_.Current.IsKeyboardFocusable -and
       -not $_.Current.IsOffscreen
     } | Sort-Object { $_.Current.BoundingRectangle.Y } -Descending | Select-Object -First 1
-    if ($composer -and -not $DryRun) {
-      $composerTextPattern = $composer.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-      $existingDraft = $composerTextPattern.DocumentRange.GetText(4096).Trim()
-      if ($existingDraft) {
+    $busy = @($all | Where-Object {
+      $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+      -not $_.Current.IsOffscreen -and
+      $_.Current.Name -match '^(停止|Stop)$'
+    }).Count -gt 0
+    if ($composer) {
+      $existingDraft = Get-ComposerText $composer
+      $draftLength = $existingDraft.Length
+      if ($existingDraft -and -not $DryRun -and -not $StashDraft) {
         $blockedByDraft = $true
         $composer = $null
+        break
       }
+    }
+    if ($busy -and -not $DryRun -and -not $StashDraft) {
+      $composer = $null
     }
     if ($document -and $composer) { break }
     Start-Sleep -Milliseconds 500
@@ -87,9 +125,44 @@ try {
     if ($blockedByDraft) { throw "Codex has unsent text in its composer; the remote message was not mixed into it" }
     throw "Codex is still busy and its composer is unavailable"
   }
+  if ($StashDraft) {
+    $backupPath = $null
+    if ($existingDraft) {
+      $backupDirectory = Join-Path $env:USERPROFILE ".relaydesk\draft-backups"
+      [void](New-Item -ItemType Directory -Path $backupDirectory -Force)
+      $backupPath = Join-Path $backupDirectory ("codex-draft-{0}.txt" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+      [IO.File]::WriteAllText($backupPath, $existingDraft, (New-Object Text.UTF8Encoding($false)))
+      [uint32]$stashTargetProcess = 0
+      $stashTargetThread = [RelayDeskNative]::GetWindowThreadProcessId($app.MainWindowHandle, [ref]$stashTargetProcess)
+      $stashCurrentThread = [RelayDeskNative]::GetCurrentThreadId()
+      $stashAttached = $false
+      try {
+        if ($stashTargetThread -ne 0 -and $stashTargetThread -ne $stashCurrentThread) {
+          $stashAttached = [RelayDeskNative]::AttachThreadInput($stashCurrentThread, $stashTargetThread, $true)
+        }
+        [void][RelayDeskNative]::ShowWindowAsync($app.MainWindowHandle, 9)
+        [void][RelayDeskNative]::BringWindowToTop($app.MainWindowHandle)
+        [void][RelayDeskNative]::SetForegroundWindow($app.MainWindowHandle)
+        Start-Sleep -Milliseconds 180
+        $composer.SetFocus()
+        Start-Sleep -Milliseconds 100
+        [System.Windows.Forms.SendKeys]::SendWait("^a")
+        [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
+        Start-Sleep -Milliseconds 250
+      } finally {
+        if ($stashAttached) {
+          [void][RelayDeskNative]::AttachThreadInput($stashCurrentThread, $stashTargetThread, $false)
+        }
+      }
+      $remainingDraft = Get-ComposerText $composer
+      if ($remainingDraft) { throw "Codex draft was backed up but could not be cleared" }
+    }
+    [PSCustomObject]@{ ok = $true; stashed = [bool]$existingDraft; path = $backupPath } | ConvertTo-Json -Compress
+    exit 0
+  }
   if ($DryRun) {
     $bounds = $composer.Current.BoundingRectangle
-    [PSCustomObject]@{ ok = $true; window = "Codex"; composer = "ProseMirror"; width = [int]$bounds.Width; height = [int]$bounds.Height } | ConvertTo-Json -Compress
+    [PSCustomObject]@{ ok = $true; window = "Codex"; composer = "ProseMirror"; width = [int]$bounds.Width; height = [int]$bounds.Height; draftLength = $draftLength; busy = $busy } | ConvertTo-Json -Compress
     exit 0
   }
 
@@ -108,26 +181,44 @@ try {
     Start-Sleep -Milliseconds 180
     $composer.SetFocus()
     Start-Sleep -Milliseconds 100
-    $savedClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
-    [System.Windows.Forms.Clipboard]::SetText($prompt)
+    $savedClipboard = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetDataObject() }
+    Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($prompt) } | Out-Null
     [System.Windows.Forms.SendKeys]::SendWait("^v")
     Start-Sleep -Milliseconds 180
     if ($ValidatePaste) {
-      $textPattern = $composer.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-      $visibleText = $textPattern.DocumentRange.GetText(4096)
+      $visibleText = Get-ComposerText $composer
       if (-not $visibleText.Contains($prompt)) { throw "Codex did not receive the pasted text" }
       [System.Windows.Forms.SendKeys]::SendWait("^a")
       [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
     } else {
-      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+      $updated = $root.FindAll(
+        [System.Windows.Automation.TreeScope]::Subtree,
+        [System.Windows.Automation.Condition]::TrueCondition
+      )
+      $sendButton = $updated | Where-Object {
+        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+        -not $_.Current.IsOffscreen -and
+        $_.Current.Name -match '^(发送|发送消息|Send|Submit)$'
+      } | Select-Object -First 1
+      if ($sendButton) {
+        $invoke = $sendButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $invoke.Invoke()
+      } else {
+        [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+      }
+      Start-Sleep -Milliseconds 500
+      $remaining = Get-ComposerText $composer
+      if ($remaining.Contains($prompt)) { throw "Codex kept the remote message as a draft instead of sending it" }
     }
     Start-Sleep -Milliseconds 160
   } finally {
-    if ($null -ne $savedClipboard) {
-      [System.Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true)
-    } else {
-      [System.Windows.Forms.Clipboard]::Clear()
-    }
+    try {
+      if ($null -ne $savedClipboard) {
+        Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true) } | Out-Null
+      } else {
+        Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::Clear() } | Out-Null
+      }
+    } catch { }
     if ($attached) {
       [void][RelayDeskNative]::AttachThreadInput($currentThread, $targetThread, $false)
     }
