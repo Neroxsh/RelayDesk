@@ -264,6 +264,15 @@ async function handleCommand(config, clientId, payload) {
         try {
           await run.completed;
           await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
+        } catch (error) {
+          await send(config, clientId, {
+            type: "run:status",
+            requestId,
+            sessionKey: key,
+            status: "failed",
+            error: error instanceof Error ? error.message : "发送失败",
+          });
+          throw error;
         } finally {
           activeRuns.delete(key);
           invalidateSessions();
@@ -345,7 +354,9 @@ async function poll(config) {
     try {
       const envelope = JSON.parse(message.envelope);
       const payload = await decryptJson(await clientKey(config, clientId), envelope);
-      void handleCommand(config, clientId, payload);
+      void handleCommand(config, clientId, payload).catch((error) => {
+        console.error(`手机请求处理失败：${error instanceof Error ? error.message : error}`);
+      });
     } catch (error) {
       console.error(`无法读取手机消息：${error instanceof Error ? error.message : error}`);
     }

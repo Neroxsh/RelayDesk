@@ -18,6 +18,10 @@ public static class RelayDeskNative {
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint currentThread, uint targetThread, bool attach);
 }
 "@
 
@@ -29,6 +33,10 @@ try {
     Where-Object { $_.MainWindowHandle -ne 0 } |
     Select-Object -First 1
   if (-not $app) { throw "No open Codex window was found" }
+
+  [void][RelayDeskNative]::ShowWindowAsync($app.MainWindowHandle, 9)
+  [void][RelayDeskNative]::SetForegroundWindow($app.MainWindowHandle)
+  Start-Sleep -Milliseconds 320
 
   $renderHandle = [IntPtr]::Zero
   $callback = [RelayDeskNative+EnumWindowsProc]{
@@ -42,9 +50,8 @@ try {
     return $true
   }
   [void][RelayDeskNative]::EnumChildWindows($app.MainWindowHandle, $callback, [IntPtr]::Zero)
-  if ($renderHandle -eq [IntPtr]::Zero) { throw "The Codex page is not ready" }
-
-  $root = [System.Windows.Automation.AutomationElement]::FromHandle($renderHandle)
+  $automationHandle = if ($renderHandle -ne [IntPtr]::Zero) { $renderHandle } else { $app.MainWindowHandle }
+  $root = [System.Windows.Automation.AutomationElement]::FromHandle($automationHandle)
   $all = $root.FindAll(
     [System.Windows.Automation.TreeScope]::Subtree,
     [System.Windows.Automation.Condition]::TrueCondition
@@ -67,14 +74,22 @@ try {
     exit 0
   }
 
-  [void][RelayDeskNative]::ShowWindowAsync($app.MainWindowHandle, 9)
-  [void][RelayDeskNative]::SetForegroundWindow($app.MainWindowHandle)
-  Start-Sleep -Milliseconds 180
-  $composer.SetFocus()
-  Start-Sleep -Milliseconds 100
-
-  $savedClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
+  [uint32]$targetProcess = 0
+  $targetThread = [RelayDeskNative]::GetWindowThreadProcessId($app.MainWindowHandle, [ref]$targetProcess)
+  $currentThread = [RelayDeskNative]::GetCurrentThreadId()
+  $attached = $false
+  if ($targetThread -ne 0 -and $targetThread -ne $currentThread) {
+    $attached = [RelayDeskNative]::AttachThreadInput($currentThread, $targetThread, $true)
+  }
+  $savedClipboard = $null
   try {
+    [void][RelayDeskNative]::ShowWindowAsync($app.MainWindowHandle, 9)
+    [void][RelayDeskNative]::BringWindowToTop($app.MainWindowHandle)
+    [void][RelayDeskNative]::SetForegroundWindow($app.MainWindowHandle)
+    Start-Sleep -Milliseconds 180
+    $composer.SetFocus()
+    Start-Sleep -Milliseconds 100
+    $savedClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
     [System.Windows.Forms.Clipboard]::SetText($prompt)
     [System.Windows.Forms.SendKeys]::SendWait("^v")
     Start-Sleep -Milliseconds 180
@@ -85,6 +100,9 @@ try {
       [System.Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true)
     } else {
       [System.Windows.Forms.Clipboard]::Clear()
+    }
+    if ($attached) {
+      [void][RelayDeskNative]::AttachThreadInput($currentThread, $targetThread, $false)
     }
   }
   [PSCustomObject]@{ ok = $true; window = "Codex" } | ConvertTo-Json -Compress
