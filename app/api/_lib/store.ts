@@ -13,14 +13,15 @@ export function store(): D1Database {
 export function ensureSchema(): Promise<void> {
   if (!schemaPromise) {
     const db = store();
-    schemaPromise = db
-      .batch([
+    schemaPromise = (async () => {
+      await db.batch([
         db.prepare(`CREATE TABLE IF NOT EXISTS devices (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           platform TEXT NOT NULL,
           agent_token_hash TEXT NOT NULL UNIQUE,
           public_key TEXT NOT NULL,
+          pair_key_hash TEXT UNIQUE,
           code_hash TEXT UNIQUE,
           code_expires_at INTEGER,
           paired_at INTEGER,
@@ -50,11 +51,30 @@ export function ensureSchema(): Promise<void> {
           count INTEGER NOT NULL,
           reset_at INTEGER NOT NULL
         )`),
+        db.prepare(`CREATE TABLE IF NOT EXISTS pending_pairs (
+          id TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          phone_name TEXT NOT NULL,
+          public_key TEXT NOT NULL,
+          pair_key_hash TEXT NOT NULL,
+          poll_token_hash TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          client_id TEXT,
+          client_token TEXT,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          resolved_at INTEGER
+        )`),
         db.prepare("CREATE INDEX IF NOT EXISTS messages_target_idx ON messages(target_id, id)"),
         db.prepare("CREATE INDEX IF NOT EXISTS clients_device_idx ON clients(device_id)"),
-      ])
-      .then(() => undefined)
-      .catch((error: unknown) => {
+        db.prepare("CREATE INDEX IF NOT EXISTS pending_pairs_device_idx ON pending_pairs(device_id, status)"),
+      ]);
+      const columns = await db.prepare("PRAGMA table_info(devices)").all<{ name: string }>();
+      if (!(columns.results ?? []).some((column) => column.name === "pair_key_hash")) {
+        await db.prepare("ALTER TABLE devices ADD COLUMN pair_key_hash TEXT").run();
+      }
+      await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS devices_pair_key_hash_idx ON devices(pair_key_hash)").run();
+    })().catch((error: unknown) => {
         schemaPromise = undefined;
         throw error;
       });
@@ -129,6 +149,10 @@ export function validPublicKey(value: unknown) {
   if (!value || typeof value !== "object") return false;
   const key = value as Record<string, unknown>;
   return key.kty === "EC" && key.crv === "P-256" && typeof key.x === "string" && typeof key.y === "string";
+}
+
+export function validHash(value: unknown) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 export async function rateLimitPair(request: Request) {

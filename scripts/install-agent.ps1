@@ -24,12 +24,6 @@ $startupCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolic
 Set-ItemProperty -Path $runKey -Name "RelayDeskAgent" -Value $startupCommand
 
 Set-Location -LiteralPath $projectRoot
-$pairArguments = @(".\agent\index.mjs", "pair", "--relay", $relay)
-if ($SiteToken) {
-  $pairArguments += @("--site-token", $SiteToken)
-}
-& node @pairArguments
-
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
   "-NoProfile",
   "-WindowStyle", "Hidden",
@@ -37,3 +31,10 @@ Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
   "-File", $runner,
   "-RelayUrl", $relay
 )
+
+Start-Sleep -Seconds 2
+$controlArguments = @(".\agent\index.mjs", "control", "--relay", $relay)
+if ($SiteToken) {
+  $controlArguments += @("--site-token", $SiteToken)
+}
+& node @controlArguments

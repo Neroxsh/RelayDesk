@@ -1,4 +1,4 @@
-import { ensureSchema, first, jsonError, now, readJson, sha256, store, validId, validPublicKey } from "../../_lib/store";
+import { ensureSchema, first, jsonError, now, readJson, sha256, store, validHash, validId, validPublicKey } from "../../_lib/store";
 
 type RegisterBody = {
   deviceId?: string;
@@ -6,6 +6,7 @@ type RegisterBody = {
   name?: string;
   platform?: string;
   publicKey?: JsonWebKey;
+  pairKeyHash?: string;
 };
 
 export async function POST(request: Request) {
@@ -16,6 +17,7 @@ export async function POST(request: Request) {
       return jsonError("设备凭据无效");
     }
     if (!validPublicKey(body.publicKey)) return jsonError("设备公钥无效");
+    if (!validHash(body.pairKeyHash)) return jsonError("永久连接密钥无效");
     const db = store();
     const tokenHash = await sha256(body.agentToken);
     const existing = await first<{ agent_token_hash: string }>(
@@ -27,11 +29,11 @@ export async function POST(request: Request) {
     const platform = (body.platform ?? "unknown").trim().slice(0, 40);
     const publicKey = JSON.stringify(body.publicKey);
     await db
-      .prepare(`INSERT INTO devices(id, name, platform, agent_token_hash, public_key, last_seen_at, created_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?)
+      .prepare(`INSERT INTO devices(id, name, platform, agent_token_hash, public_key, pair_key_hash, last_seen_at, created_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform = excluded.platform,
-          public_key = excluded.public_key, last_seen_at = excluded.last_seen_at`)
-      .bind(body.deviceId, name, platform, tokenHash, publicKey, timestamp, timestamp)
+          public_key = excluded.public_key, pair_key_hash = excluded.pair_key_hash, last_seen_at = excluded.last_seen_at`)
+      .bind(body.deviceId, name, platform, tokenHash, publicKey, body.pairKeyHash, timestamp, timestamp)
       .run();
     return Response.json({ ok: true, deviceId: body.deviceId });
   } catch (error) {

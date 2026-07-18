@@ -6,6 +6,7 @@ export const devices = sqliteTable("devices", {
   platform: text("platform").notNull(),
   agentTokenHash: text("agent_token_hash").notNull().unique(),
   publicKey: text("public_key").notNull(),
+  pairKeyHash: text("pair_key_hash").unique(),
   codeHash: text("code_hash").unique(),
   codeExpiresAt: integer("code_expires_at"),
   pairedAt: integer("paired_at"),
@@ -49,3 +50,22 @@ export const pairAttempts = sqliteTable("pair_attempts", {
   count: integer("count").notNull(),
   resetAt: integer("reset_at").notNull(),
 });
+
+export const pendingPairs = sqliteTable(
+  "pending_pairs",
+  {
+    id: text("id").primaryKey(),
+    deviceId: text("device_id").notNull(),
+    phoneName: text("phone_name").notNull(),
+    publicKey: text("public_key").notNull(),
+    pairKeyHash: text("pair_key_hash").notNull(),
+    pollTokenHash: text("poll_token_hash").notNull().unique(),
+    status: text("status").notNull(),
+    clientId: text("client_id"),
+    clientToken: text("client_token"),
+    createdAt: integer("created_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    resolvedAt: integer("resolved_at"),
+  },
+  (table) => [index("pending_pairs_device_idx").on(table.deviceId, table.status)],
+);

@@ -1,4 +1,4 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
@@ -6,6 +6,9 @@ const CODEX_ROOT = process.env.CODEX_HOME
   ? path.join(process.env.CODEX_HOME, "sessions")
   : path.join(os.homedir(), ".codex", "sessions");
 const CLAUDE_ROOT = path.join(os.homedir(), ".claude", "projects");
+const CODEX_INDEX = process.env.CODEX_HOME
+  ? path.join(process.env.CODEX_HOME, "session_index.jsonl")
+  : path.join(os.homedir(), ".codex", "session_index.jsonl");
 const MAX_HISTORY_BYTES = 3 * 1024 * 1024;
 
 let cache = { at: 0, sessions: [] };
@@ -88,48 +91,100 @@ function trimTitle(value) {
     .slice(0, 72);
 }
 
+const METADATA_TAGS = [
+  "recommended_plugins",
+  "environment_context",
+  "permissions instructions",
+  "app-context",
+  "skills_instructions",
+  "apps_instructions",
+  "plugins_instructions",
+  "collaboration_mode",
+];
+
+function sanitizeUserText(value) {
+  let text = String(value ?? "");
+  if (/^# Session title\b/i.test(text.trim())) return "";
+  for (const tag of METADATA_TAGS) {
+    const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    text = text.replace(new RegExp(`<${escaped}>[\\s\\S]*?<\\/${escaped}>`, "gi"), "");
+  }
+  text = text.replace(/# AGENTS\.md instructions\s*<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/gi, "");
+  text = text.replace(/<image\s+name=[^>]+>/gi, "（图片）").replace(/<\/image>/gi, "");
+  return text.trim();
+}
+
+function isMetadataOnly(value) {
+  const text = sanitizeUserText(value);
+  return !text || /^(?:<[^>]+>|# AGENTS\.md instructions|# Session title|<INSTRUCTIONS>)/i.test(text);
+}
+
+async function codexThreadNames() {
+  const names = new Map();
+  try {
+    for (const row of parseLines(await readFile(CODEX_INDEX, "utf8"))) {
+      if (row?.id && row?.thread_name) names.set(row.id, trimTitle(row.thread_name));
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "EACCES") throw error;
+  }
+  return names;
+}
+
+function projectFields(cwd) {
+  const projectPath = String(cwd ?? "");
+  return {
+    projectPath,
+    projectName: projectPath ? path.basename(path.normalize(projectPath)) || projectPath : "未归类",
+  };
+}
+
 function uuidFromFilename(filePath) {
   const match = path.basename(filePath).match(/([0-9a-f]{8}-[0-9a-f-]{27,})/i);
   return match?.[1] ?? path.basename(filePath, ".jsonl");
 }
 
-function codexMeta(rows, filePath) {
+function codexMeta(rows, filePath, threadNames) {
   const meta = rows.find((row) => row?.type === "session_meta")?.payload ?? {};
-  let title = "";
+  const id = meta.id ?? meta.session_id ?? uuidFromFilename(filePath);
+  let title = threadNames.get(id) ?? "";
   for (const row of rows) {
+    if (title) break;
     if (row?.type === "event_msg" && row.payload?.type === "user_message") {
-      title = trimTitle(row.payload.message);
+      title = trimTitle(sanitizeUserText(row.payload.message));
       if (title) break;
     }
     if (row?.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "user") {
-      title = trimTitle(textFromContent(row.payload.content));
+      title = trimTitle(sanitizeUserText(textFromContent(row.payload.content)));
       if (title) break;
     }
   }
   return {
-    id: meta.id ?? meta.session_id ?? uuidFromFilename(filePath),
+    id,
     provider: "codex",
     title: title || "Codex 会话",
     cwd: meta.cwd ?? "",
+    ...projectFields(meta.cwd),
     filePath,
   };
 }
 
 function claudeMeta(rows, filePath) {
   const first = rows.find((row) => row?.sessionId || row?.cwd) ?? {};
-  const user = rows.find((row) => row?.type === "user" && !row?.isMeta);
+  const user = rows.find((row) => row?.type === "user" && !row?.isMeta && !isMetadataOnly(textFromContent(row.message?.content)));
   return {
     id: first.sessionId ?? uuidFromFilename(filePath),
     provider: "claude",
-    title: trimTitle(textFromContent(user?.message?.content)) || "Claude 会话",
+    title: trimTitle(sanitizeUserText(textFromContent(user?.message?.content))) || "Claude 会话",
     cwd: first.cwd ?? "",
+    ...projectFields(first.cwd),
     filePath,
   };
 }
 
 export async function listSessions(force = false) {
   if (!force && Date.now() - cache.at < 2_000) return cache.sessions;
-  const [codexFiles, claudeFiles] = await Promise.all([walk(CODEX_ROOT), walk(CLAUDE_ROOT)]);
+  const [codexFiles, claudeFiles, threadNames] = await Promise.all([walk(CODEX_ROOT), walk(CLAUDE_ROOT), codexThreadNames()]);
   const sessions = [];
   for (const [provider, files] of [
     ["codex", codexFiles],
@@ -139,7 +194,7 @@ export async function listSessions(force = false) {
       try {
         const info = await stat(filePath);
         const headRows = parseLines(await readHead(filePath));
-        const session = provider === "codex" ? codexMeta(headRows, filePath) : claudeMeta(headRows, filePath);
+        const session = provider === "codex" ? codexMeta(headRows, filePath, threadNames) : claudeMeta(headRows, filePath);
         sessions.push({
           ...session,
           key: `${provider}:${session.id}`,
@@ -157,7 +212,7 @@ export async function listSessions(force = false) {
 }
 
 function pushMessage(messages, role, content, timestamp, meta) {
-  const text = String(content ?? "").trim();
+  const text = role === "user" ? sanitizeUserText(content) : String(content ?? "").trim();
   if (!text) return;
   const previous = messages.at(-1);
   if (previous?.role === role && previous.content === text) return;

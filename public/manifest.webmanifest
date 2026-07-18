@@ -1,7 +1,7 @@
 {
   "name": "RelayDesk — 远程工作台",
   "short_name": "RelayDesk",
-  "description": "从手机继续电脑上的 Codex 与 Claude Code 会话",
+  "description": "从手机按项目继续 Codex 与 Claude Code，并控制当前 Codex 窗口",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0c1017",

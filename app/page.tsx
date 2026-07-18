@@ -1,6 +1,8 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   createPhoneKeys,
   decryptJson,
@@ -19,9 +21,12 @@ type SessionSummary = {
   provider: Provider;
   title: string;
   cwd: string;
+  projectName?: string;
+  projectPath?: string;
   updatedAt: number;
   recent?: boolean;
   active?: boolean;
+  currentWindow?: boolean;
 };
 type Message = {
   id: string;
@@ -36,22 +41,34 @@ type StoredPairing = {
   key: string;
   device: { id: string; name: string; platform: string };
 };
+type PendingPair = {
+  requestId: string;
+  pollToken: string;
+  privateKey: JsonWebKey;
+  pairKeyHash: string;
+  deviceName: string;
+  expiresAt: number;
+};
 type DeviceStatus = { name: string; platform: string; online: boolean; lastSeenAt: number };
 type RemotePayload = Record<string, unknown> & { type?: string; requestId?: string };
-type PairApiResponse = {
+type PollResponse = {
   error?: string;
-  clientId: string;
-  clientToken: string;
-  device: { id: string; name: string; platform: string; publicKey: JsonWebKey };
-};
-type ErrorApiResponse = { error?: string };
-type PollApiResponse = ErrorApiResponse & {
   cursor?: number;
   device?: DeviceStatus | null;
-  messages?: Array<{ kind: string; envelope: string }>;
+  messages?: Array<{ id: number; kind: string; envelope: string }>;
 };
 
-const STORAGE_KEY = "relaydesk.pairing.v1";
+const STORAGE_KEY = "relaydesk.pairing.v2";
+const LEGACY_STORAGE_KEY = "relaydesk.pairing.v1";
+const PENDING_KEY = "relaydesk.pending.v2";
+
+function normalizePairKey(value: string) {
+  return value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 16);
+}
+
+function formatPairKey(value: string) {
+  return normalizePairKey(value).match(/.{1,4}/g)?.join("-") ?? "";
+}
 
 function formatWhen(timestamp: number) {
   const date = new Date(timestamp);
@@ -62,89 +79,171 @@ function formatWhen(timestamp: number) {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
 }
 
-function projectName(cwd: string) {
-  const parts = cwd.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) || "未知项目";
+function phoneName() {
+  const value = navigator.userAgent;
+  if (/iPhone/i.test(value)) return "iPhone";
+  if (/iPad/i.test(value)) return "iPad";
+  if (/Android/i.test(value)) return "Android 手机";
+  return "手机浏览器";
 }
 
 function PairScreen({ onPaired }: { onPaired: (pairing: StoredPairing) => void }) {
-  const [code, setCode] = useState("");
+  const [keyText, setKeyText] = useState("");
+  const [pending, setPending] = useState<PendingPair | null>(null);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
 
-  async function pair(event: FormEvent) {
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const raw = localStorage.getItem(PENDING_KEY);
+      if (!raw) return;
+      try {
+        const saved = JSON.parse(raw) as PendingPair;
+        if (saved.expiresAt > Date.now()) setPending(saved);
+        else localStorage.removeItem(PENDING_KEY);
+      } catch {
+        localStorage.removeItem(PENDING_KEY);
+      }
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!pending) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const check = async () => {
+      try {
+        const response = await fetch(`/api/pair/status?requestId=${encodeURIComponent(pending.requestId)}`, {
+          headers: { authorization: `Bearer ${pending.pollToken}` },
+          cache: "no-store",
+        });
+        const data = await response.json() as {
+          status?: string;
+          error?: string;
+          clientId?: string;
+          clientToken?: string;
+          device?: { id: string; name: string; platform: string; publicKey: JsonWebKey };
+        };
+        if (!response.ok) throw new Error(data.error ?? "无法查询确认状态");
+        if (data.status === "approved" && data.clientId && data.clientToken && data.device) {
+          const sessionKey = await deriveSessionKey(pending.privateKey, data.device.publicKey, pending.pairKeyHash);
+          const pairing: StoredPairing = {
+            clientId: data.clientId,
+            clientToken: data.clientToken,
+            key: await exportSessionKey(sessionKey),
+            device: { id: data.device.id, name: data.device.name, platform: data.device.platform },
+          };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(pairing));
+          localStorage.removeItem(PENDING_KEY);
+          if (!stopped) onPaired(pairing);
+          return;
+        }
+        if (["rejected", "expired"].includes(data.status ?? "")) {
+          localStorage.removeItem(PENDING_KEY);
+          if (!stopped) {
+            setPending(null);
+            setError(data.status === "rejected" ? "电脑端拒绝了这次绑定" : "确认请求已过期，请重新提交");
+          }
+          return;
+        }
+      } catch (pollError) {
+        if (!stopped) setError(pollError instanceof Error ? pollError.message : "连接暂时中断");
+      }
+      if (!stopped) timer = setTimeout(check, 1400);
+    };
+    void check();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [pending, onPaired]);
+
+  async function requestPair(event: FormEvent) {
     event.preventDefault();
-    if (code.length !== 6 || working) return;
+    const normalized = normalizePairKey(keyText);
+    if (normalized.length !== 16 || working) return;
     setWorking(true);
     setError("");
     try {
-      const codeHash = await sha256(code);
+      const pairKeyHash = await sha256(normalized);
       const keys = await createPhoneKeys();
-      const response = await fetch("/api/pair", {
+      const response = await fetch("/api/pair/request", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ codeHash, publicKey: keys.publicKey }),
+        body: JSON.stringify({ pairKeyHash, publicKey: keys.publicKey, phoneName: phoneName() }),
       });
-      const data = (await response.json()) as PairApiResponse;
-      if (!response.ok) throw new Error(data.error ?? "配对失败");
-      const sessionKey = await deriveSessionKey(keys.privateKey, data.device.publicKey, codeHash);
-      const pairing: StoredPairing = {
-        clientId: data.clientId,
-        clientToken: data.clientToken,
-        key: await exportSessionKey(sessionKey),
-        device: {
-          id: data.device.id,
-          name: data.device.name,
-          platform: data.device.platform,
-        },
+      const data = await response.json() as {
+        error?: string;
+        requestId?: string;
+        pollToken?: string;
+        deviceName?: string;
+        expiresAt?: number;
       };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(pairing));
-      onPaired(pairing);
+      if (!response.ok || !data.requestId || !data.pollToken || !data.expiresAt) {
+        throw new Error(data.error ?? "无法提交连接请求");
+      }
+      const next: PendingPair = {
+        requestId: data.requestId,
+        pollToken: data.pollToken,
+        privateKey: keys.privateKey,
+        pairKeyHash,
+        deviceName: data.deviceName ?? "你的电脑",
+        expiresAt: data.expiresAt,
+      };
+      localStorage.setItem(PENDING_KEY, JSON.stringify(next));
+      setPending(next);
     } catch (pairError) {
-      setError(pairError instanceof Error ? pairError.message : "配对失败，请重试");
+      setError(pairError instanceof Error ? pairError.message : "连接失败，请重试");
     } finally {
       setWorking(false);
     }
   }
 
+  function cancelPending() {
+    localStorage.removeItem(PENDING_KEY);
+    setPending(null);
+    setError("");
+  }
+
   return (
     <main className="pair-shell">
-      <div className="pair-orb pair-orb-one" />
-      <div className="pair-orb pair-orb-two" />
       <section className="pair-card" aria-labelledby="pair-title">
         <div className="brand-mark" aria-hidden="true"><span>R</span></div>
         <p className="eyebrow">RelayDesk · 私人远程工作台</p>
-        <h1 id="pair-title">电脑不在身边，工作还在手里。</h1>
-        <p className="pair-lead">输入电脑端显示的 6 位配对码，接管你的 Codex 与 Claude Code 会话。</p>
-
-        <form onSubmit={pair} className="pair-form">
-          <label htmlFor="pair-code">配对码</label>
-          <input
-            id="pair-code"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            autoFocus
-            maxLength={6}
-            value={code}
-            onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-            placeholder="000000"
-            aria-describedby={error ? "pair-error" : undefined}
-          />
-          {error ? <p id="pair-error" className="form-error">{error}</p> : null}
-          <button type="submit" disabled={code.length !== 6 || working}>
-            {working ? "正在建立加密连接…" : "连接我的电脑"}
-          </button>
-        </form>
-
-        <div className="security-note">
-          <span className="lock-dot" aria-hidden="true">●</span>
-          <div>
-            <strong>端到端加密</strong>
-            <p>会话内容只在你的手机和电脑上解密；配对码 10 分钟后失效。</p>
+        {pending ? (
+          <div className="approval-state">
+            <div className="approval-icon"><span /></div>
+            <h1 id="pair-title">请在电脑上确认</h1>
+            <p>已向 <strong>{pending.deviceName}</strong> 发送永久绑定请求。电脑控制中心会自动打开。</p>
+            <div className="approval-steps"><span>1</span><b>找到“等待确认”</b><i /><span>2</span><b>点击“确认绑定”</b></div>
+            {error ? <p className="form-error">{error}</p> : null}
+            <button className="text-button" type="button" onClick={cancelPending}>取消并重新输入</button>
           </div>
-        </div>
+        ) : (
+          <>
+            <h1 id="pair-title">把电脑上的 Codex，装进口袋。</h1>
+            <p className="pair-lead">输入电脑控制中心显示的永久连接密钥。只需一次，确认后不再登录、不再重复认证。</p>
+            <form onSubmit={requestPair} className="pair-form">
+              <label htmlFor="pair-key">永久连接密钥</label>
+              <input
+                id="pair-key"
+                inputMode="text"
+                autoCapitalize="characters"
+                autoComplete="off"
+                autoFocus
+                maxLength={19}
+                value={keyText}
+                onChange={(event) => setKeyText(formatPairKey(event.target.value))}
+                placeholder="XXXX-XXXX-XXXX-XXXX"
+              />
+              {error ? <p className="form-error">{error}</p> : null}
+              <button type="submit" disabled={normalizePairKey(keyText).length !== 16 || working}>
+                {working ? "正在联系电脑…" : "请求连接这台电脑"}
+              </button>
+            </form>
+            <div className="security-note"><span>●</span><div><strong>电脑确认后永久绑定</strong><p>中继只看到密文；连接密钥明文只保存在你的电脑和输入它的手机上。</p></div></div>
+          </>
+        )}
       </section>
-      <p className="pair-foot">电脑端无需开放公网端口</p>
+      <p className="pair-foot">无需 ChatGPT 账号 · 无需开放电脑公网端口</p>
     </main>
   );
 }
@@ -163,19 +262,17 @@ export default function Home() {
   const [liveMessages, setLiveMessages] = useState<Record<string, Message[]>>({});
   const [toast, setToast] = useState("");
   const [sending, setSending] = useState(false);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const cursorRef = useRef(0);
   const keyRef = useRef<CryptoKey | null>(null);
   const pairingRef = useRef<StoredPairing | null>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
       if (raw) {
-        try {
-          setPairing(JSON.parse(raw) as StoredPairing);
-        } catch {
-          localStorage.removeItem(STORAGE_KEY);
-        }
+        try { setPairing(JSON.parse(raw) as StoredPairing); }
+        catch { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(LEGACY_STORAGE_KEY); }
       }
       setHydrated(true);
     }, 0);
@@ -191,18 +288,15 @@ export default function Home() {
 
   const remoteSend = useCallback(async (payload: RemotePayload) => {
     const current = pairingRef.current;
-    if (!current) throw new Error("手机尚未配对");
+    if (!current) throw new Error("手机尚未绑定");
     if (!keyRef.current) keyRef.current = await importSessionKey(current.key);
     const envelope = await encryptJson(keyRef.current, payload);
     const response = await fetch("/api/client/send", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${current.clientToken}`,
-      },
+      headers: { "content-type": "application/json", authorization: `Bearer ${current.clientToken}` },
       body: JSON.stringify({ envelope }),
     });
-    const data = (await response.json().catch(() => ({}))) as ErrorApiResponse;
+    const data = await response.json().catch(() => ({})) as { error?: string };
     if (!response.ok) throw new Error(data.error ?? "发送失败");
   }, []);
 
@@ -213,131 +307,129 @@ export default function Home() {
     }
     if (payload.type === "session:snapshot" && payload.session) {
       const session = payload.session as SessionDetail;
-      setDetails((current) => ({ ...current, [session.key]: session }));
-      setLiveMessages((current) => ({ ...current, [session.key]: [] }));
+      setDetails((value) => ({ ...value, [session.key]: session }));
+      setLiveMessages((value) => ({ ...value, [session.key]: [] }));
       return;
     }
-    if (payload.type === "run:status") {
-      const key = String(payload.sessionKey ?? "");
-      const status = String(payload.status ?? "");
-      setRunning((current) => {
-        const next = { ...current };
-        if (status === "running" || status === "stopping") next[key] = status;
-        else delete next[key];
-        return next;
-      });
-      if (status === "failed") setToast(String(payload.error ?? "执行失败"));
-      return;
-    }
-    if (payload.type === "run:event") {
-      const key = String(payload.sessionKey ?? "");
-      const event = payload.event as { type?: string; text?: string } | undefined;
-      if (!key || !event?.text) return;
-      const role: Message["role"] = event.type === "assistant" ? "assistant" : "tool";
-      setLiveMessages((current) => ({
-        ...current,
-        [key]: [
-          ...(current[key] ?? []),
-          { id: `live-${Date.now()}-${Math.random()}`, role, content: event.text ?? "" },
-        ].slice(-80),
+    if (payload.type === "run:event" && payload.sessionKey && payload.event) {
+      const event = payload.event as { type?: string; text?: string };
+      const role = event.type === "assistant" ? "assistant" : "tool";
+      const message: Message = { id: `${Date.now()}-${Math.random()}`, role, content: event.text ?? "" };
+      setLiveMessages((value) => ({
+        ...value,
+        [payload.sessionKey as string]: [...(value[payload.sessionKey as string] ?? []), message],
       }));
       return;
     }
-    if (payload.type === "request:error") setToast(String(payload.error ?? "请求失败"));
+    if (payload.type === "run:status" && payload.sessionKey) {
+      const key = payload.sessionKey as string;
+      const status = String(payload.status ?? "");
+      setRunning((value) => {
+        const next = { ...value };
+        if (["completed", "failed", "submitted"].includes(status)) delete next[key];
+        else next[key] = status;
+        return next;
+      });
+      if (status === "submitted") setToast("已发送到电脑当前 Codex 窗口");
+      return;
+    }
+    if (payload.type === "request:error") {
+      setToast(String(payload.error ?? "请求失败"));
+      setRunning({});
+    }
   }, []);
 
   useEffect(() => {
     if (!pairing) return;
-    let cancelled = false;
+    let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
-    async function loop() {
+    const poll = async () => {
       try {
-        const current = pairingRef.current;
-        if (!current) return;
-        if (!keyRef.current) keyRef.current = await importSessionKey(current.key);
         const response = await fetch(`/api/client/poll?after=${cursorRef.current}`, {
-          headers: { authorization: `Bearer ${current.clientToken}` },
+          headers: { authorization: `Bearer ${pairing.clientToken}` },
           cache: "no-store",
         });
-        const data = (await response.json()) as PollApiResponse;
-        if (!response.ok) throw new Error(data.error ?? "连接失败");
-        cursorRef.current = Number(data.cursor) || cursorRef.current;
-        setDevice(data.device ?? null);
-        for (const message of data.messages ?? []) {
-          if (message.kind !== "encrypted") continue;
-          const payload = (await decryptJson(keyRef.current, JSON.parse(message.envelope))) as RemotePayload;
-          handlePayload(payload);
+        const data = await response.json() as PollResponse;
+        if (response.status === 401) {
+          localStorage.removeItem(STORAGE_KEY);
+          localStorage.removeItem(LEGACY_STORAGE_KEY);
+          if (!stopped) { setPairing(null); setToast("这台手机的绑定已解除"); }
+          return;
         }
+        if (!response.ok) throw new Error(data.error ?? "同步失败");
+        if (!stopped && data.device) setDevice(data.device);
+        if (!keyRef.current) keyRef.current = await importSessionKey(pairing.key);
+        for (const message of data.messages ?? []) {
+          cursorRef.current = Math.max(cursorRef.current, Number(message.id) || 0);
+          if (message.kind !== "encrypted") continue;
+          const payload = await decryptJson(keyRef.current, JSON.parse(message.envelope)) as RemotePayload;
+          if (!stopped) handlePayload(payload);
+        }
+        if (!stopped) timer = setTimeout(poll, 1100);
       } catch (error) {
-        if (!cancelled) setToast(error instanceof Error ? error.message : "连接暂时中断");
-      } finally {
-        if (!cancelled) timer = setTimeout(loop, document.visibilityState === "visible" ? 1_200 : 4_000);
+        if (!stopped) {
+          setToast(error instanceof Error ? error.message : "连接暂时中断");
+          timer = setTimeout(poll, 3000);
+        }
       }
-    }
-    void loop();
-    const kickoff = setTimeout(() => {
-      void remoteSend({ type: "sessions:list", requestId: requestId() });
-    }, 350);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      clearTimeout(kickoff);
     };
+    void remoteSend({ type: "sessions:list", requestId: requestId() }).catch(() => undefined);
+    void poll();
+    return () => { stopped = true; clearTimeout(timer); };
   }, [pairing, handlePayload, remoteSend]);
 
   useEffect(() => {
+    if (!selectedKey) return;
+    const session = sessions.find((item) => item.key === selectedKey);
+    if (!session) return;
+    void remoteSend({ type: "session:get", provider: session.provider, sessionId: session.id, requestId: requestId() })
+      .catch((error) => setToast(error instanceof Error ? error.message : "无法读取会话"));
+  }, [selectedKey, sessions, remoteSend]);
+
+  useEffect(() => {
     if (!toast) return;
-    const timer = setTimeout(() => setToast(""), 4_000);
+    const timer = setTimeout(() => setToast(""), 3200);
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const filteredSessions = useMemo(() => {
+  const currentWindow = sessions.find((session) => session.currentWindow);
+  const projectGroups = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return sessions;
-    return sessions.filter((session) =>
-      `${session.title} ${session.cwd} ${session.provider}`.toLowerCase().includes(needle),
-    );
+    const matches = sessions.filter((session) => !session.currentWindow).filter((session) => {
+      if (!needle) return true;
+      return `${session.title} ${session.cwd} ${session.provider}`.toLowerCase().includes(needle);
+    });
+    const map = new Map<string, { name: string; path: string; sessions: SessionSummary[]; updatedAt: number }>();
+    for (const session of matches) {
+      const path = session.projectPath || session.cwd || "未归类";
+      const group = map.get(path) ?? { name: session.projectName || "未归类", path, sessions: [], updatedAt: 0 };
+      group.sessions.push(session);
+      group.updatedAt = Math.max(group.updatedAt, session.updatedAt);
+      map.set(path, group);
+    }
+    return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt);
   }, [sessions, query]);
 
-  const selected = sessions.find((session) => session.key === selectedKey) ?? null;
+  const selectedSummary = sessions.find((session) => session.key === selectedKey) ?? null;
   const selectedDetail = selectedKey ? details[selectedKey] : null;
-  const messages = selectedKey
-    ? [...(selectedDetail?.messages ?? []), ...(liveMessages[selectedKey] ?? [])]
-    : [];
+  const messages = selectedKey ? [...(selectedDetail?.messages ?? []), ...(liveMessages[selectedKey] ?? [])] : [];
 
-  async function openSession(session: SessionSummary) {
-    setSelectedKey(session.key);
-    try {
-      await remoteSend({
-        type: "session:get",
-        provider: session.provider,
-        sessionId: session.id,
-        requestId: requestId(),
-      });
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "无法打开会话");
-    }
-  }
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!selected || !draft.trim() || sending || running[selected.key]) return;
-    if (mode === "full" && !window.confirm("完全控制会绕过 Codex / Claude 的权限确认。只应在你信任的项目中继续。")) return;
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
+    if (!selectedSummary || !draft.trim() || sending) return;
+    if (!selectedSummary.currentWindow && mode === "full" && !window.confirm("完全控制会绕过本机权限确认。确定继续吗？")) return;
     const prompt = draft.trim();
-    setDraft("");
     setSending(true);
-    setLiveMessages((current) => ({
-      ...current,
-      [selected.key]: [
-        ...(current[selected.key] ?? []),
-        { id: `optimistic-${Date.now()}`, role: "user", content: prompt },
-      ],
+    setDraft("");
+    setLiveMessages((value) => ({
+      ...value,
+      [selectedSummary.key]: [...(value[selectedSummary.key] ?? []), { id: `local-${Date.now()}`, role: "user", content: prompt }],
     }));
     try {
       await remoteSend({
         type: "session:send",
-        provider: selected.provider,
-        sessionId: selected.id,
+        provider: selectedSummary.provider,
+        sessionId: selectedSummary.id,
         prompt,
         mode,
         requestId: requestId(),
@@ -349,123 +441,89 @@ export default function Home() {
     }
   }
 
-  function forgetDevice() {
-    if (!window.confirm("从这台手机移除配对？电脑上的会话不会受影响。")) return;
+  function keyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      void submit();
+    }
+  }
+
+  function forgetPhone() {
+    if (!window.confirm("只清除此手机保存的绑定？电脑端仍会保留记录，可在电脑控制中心彻底解除。")) return;
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
     setPairing(null);
-    setSessions([]);
-    setDetails({});
-    setSelectedKey(null);
   }
 
   if (!hydrated) return <main className="loading-shell"><div className="loading-mark">R</div></main>;
   if (!pairing) return <PairScreen onPaired={setPairing} />;
 
   return (
-    <main className={`app-shell ${selected ? "has-selection" : ""}`}>
+    <main className={`app-shell ${selectedKey ? "has-selection" : ""}`}>
       <aside className="session-panel">
         <header className="panel-header">
-          <div className="brand-lockup">
-            <div className="brand-mark brand-mark-small" aria-hidden="true"><span>R</span></div>
-            <div><strong>RelayDesk</strong><span>远程工作台</span></div>
-          </div>
-          <button className="icon-button" onClick={forgetDevice} aria-label="移除这台设备" title="移除配对">···</button>
+          <div className="brand-lockup"><div className="brand-mark brand-mark-small"><span>R</span></div><div><strong>RelayDesk</strong><span>远程工作台</span></div></div>
+          <button className="icon-button" type="button" onClick={forgetPhone} title="此手机的连接设置">•••</button>
         </header>
-
-        <div className="device-card">
-          <span className={`status-pulse ${device?.online ? "online" : ""}`} />
-          <div><strong>{device?.name ?? pairing.device.name}</strong><span>{device?.online ? "在线 · 已加密" : "等待电脑连接"}</span></div>
-          <button
-            className="refresh-button"
-            onClick={() => void remoteSend({ type: "sessions:list", requestId: requestId() }).catch((error) => setToast(error.message))}
-            aria-label="刷新会话"
-          >↻</button>
-        </div>
-
-        <label className="search-box">
-          <span aria-hidden="true">⌕</span>
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话或项目" />
-        </label>
-
-        <div className="session-heading"><span>会话</span><span>{filteredSessions.length}</span></div>
-        <nav className="session-list" aria-label="Codex 和 Claude 会话">
-          {filteredSessions.map((session) => (
-            <button
-              key={session.key}
-              className={`session-row ${selectedKey === session.key ? "selected" : ""}`}
-              onClick={() => void openSession(session)}
-            >
-              <span className={`provider-mark ${session.provider}`}>{session.provider === "codex" ? "C" : "A"}</span>
-              <span className="session-copy">
-                <strong>{session.title}</strong>
-                <span>{projectName(session.cwd)} · {formatWhen(session.updatedAt)}</span>
-              </span>
-              {(session.active || running[session.key]) ? <span className="running-dot" title="正在执行" /> : null}
-            </button>
-          ))}
-          {!filteredSessions.length ? (
-            <div className="empty-list"><span>⌁</span><p>{device?.online ? "还没有找到会话" : "电脑上线后会话会出现在这里"}</p></div>
-          ) : null}
+        <div className="device-card"><span className={`status-pulse ${device?.online ? "online" : ""}`} /><div><strong>{device?.name ?? pairing.device.name}</strong><span>{device?.online ? "电脑在线 · 实时同步" : "等待电脑上线"}</span></div><button className="refresh-button" type="button" onClick={() => void remoteSend({ type: "sessions:list", requestId: requestId() })}>↻</button></div>
+        {currentWindow ? (
+          <button className={`current-window ${selectedKey === currentWindow.key ? "selected" : ""}`} type="button" onClick={() => setSelectedKey(currentWindow.key)}>
+            <span className="live-window-icon">⌁</span><span><b>当前 Codex 窗口</b><small>直接输入到电脑当前任务</small></span><i className="online-pin" />
+          </button>
+        ) : null}
+        <label className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目或会话" /></label>
+        <div className="project-heading"><span>项目</span><b>{projectGroups.length}</b></div>
+        <nav className="project-list" aria-label="项目和会话">
+          {projectGroups.map((project) => {
+            const isCollapsed = collapsed[project.path];
+            return (
+              <section className="project-group" key={project.path}>
+                <button className="project-row" type="button" onClick={() => setCollapsed((value) => ({ ...value, [project.path]: !value[project.path] }))}>
+                  <span className="folder-icon">⌑</span><span><strong>{project.name}</strong><small>{project.path}</small></span><i>{isCollapsed ? "›" : "⌄"}</i>
+                </button>
+                {!isCollapsed ? <div className="project-sessions">{project.sessions.map((session) => (
+                  <button className={`session-row ${selectedKey === session.key ? "selected" : ""}`} type="button" key={session.key} onClick={() => setSelectedKey(session.key)}>
+                    <span className={`provider-mark ${session.provider}`}>{session.provider === "codex" ? "C" : "A"}</span>
+                    <span className="session-copy"><strong>{session.title}</strong><span>{session.provider === "codex" ? "Codex" : "Claude Code"} · {formatWhen(session.updatedAt)}</span></span>
+                    {session.active || running[session.key] ? <i className="running-dot" /> : null}
+                  </button>
+                ))}</div> : null}
+              </section>
+            );
+          })}
+          {!projectGroups.length ? <div className="empty-list"><span>⌕</span><p>没有找到匹配的项目或会话</p></div> : null}
         </nav>
       </aside>
 
       <section className="conversation-panel">
-        {selected ? (
+        {selectedSummary ? (
           <>
             <header className="conversation-header">
-              <button className="back-button" onClick={() => setSelectedKey(null)} aria-label="返回会话列表">‹</button>
-              <span className={`provider-mark ${selected.provider}`}>{selected.provider === "codex" ? "C" : "A"}</span>
-              <div className="conversation-title"><strong>{selected.title}</strong><span>{selected.cwd || "项目路径未知"}</span></div>
-              {running[selected.key] ? (
-                <button
-                  className="stop-button"
-                  onClick={() => void remoteSend({ type: "session:stop", provider: selected.provider, sessionId: selected.id, requestId: requestId() })}
-                >停止</button>
-              ) : null}
+              <button className="back-button" type="button" onClick={() => setSelectedKey(null)}>‹</button>
+              <span className={`provider-mark ${selectedSummary.provider}`}>{selectedSummary.provider === "codex" ? "C" : "A"}</span>
+              <div className="conversation-title"><strong>{selectedSummary.title}</strong><span>{selectedSummary.currentWindow ? "电脑当前窗口 · 发送后会自动切到 Codex" : selectedSummary.cwd}</span></div>
+              {running[selectedSummary.key] ? <span className="header-running"><i />运行中</span> : null}
             </header>
-
             <div className="message-scroll">
               {!selectedDetail ? <div className="loading-conversation"><span /><span /><span /></div> : null}
-              {messages.map((message) => (
-                <article key={message.id} className={`message ${message.role}`}>
-                  <div className="message-label">{message.role === "user" ? "你" : message.role === "assistant" ? selected.provider === "codex" ? "Codex" : "Claude" : "工具"}</div>
-                  <div className="message-body">{message.content}</div>
+              {messages.map((message) => message.role === "tool" ? (
+                <details className="tool-message" key={message.id}><summary>工具记录</summary><div><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div></details>
+              ) : (
+                <article className={`message ${message.role}`} key={message.id}>
+                  <div className="message-label">{message.role === "user" ? "你" : selectedSummary.provider === "codex" ? "Codex" : "Claude"}</div>
+                  <div className="message-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
                 </article>
               ))}
-              {running[selected.key] ? <div className="thinking-line"><span /><p>{running[selected.key] === "stopping" ? "正在停止…" : "正在电脑上执行…"}</p></div> : null}
+              {running[selectedSummary.key] ? <div className="thinking-line"><span /><p>{selectedSummary.currentWindow ? "正在发送到电脑窗口…" : "正在电脑上执行…"}</p></div> : null}
             </div>
-
             <form className="composer" onSubmit={submit}>
-              <div className="mode-switch" aria-label="权限模式">
-                <button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>安全模式</button>
-                <button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>完全控制</button>
-              </div>
-              <div className="composer-input">
-                <textarea
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                  placeholder={`给 ${selected.provider === "codex" ? "Codex" : "Claude"} 发指令…`}
-                  rows={1}
-                  maxLength={12_000}
-                />
-                <button type="submit" disabled={!draft.trim() || sending || Boolean(running[selected.key])} aria-label="发送指令">↑</button>
-              </div>
-              <p>{mode === "safe" ? "默认拒绝需要额外授权的操作" : "将绕过本机权限确认，请谨慎使用"}</p>
+              {!selectedSummary.currentWindow ? <div className="mode-switch"><button type="button" className={mode === "safe" ? "active" : ""} onClick={() => setMode("safe")}>安全模式</button><button type="button" className={mode === "full" ? "active danger" : ""} onClick={() => setMode("full")}>完全控制</button></div> : <div className="window-target"><span>⌁</span>发送到电脑当前 Codex 输入框</div>}
+              <div className="composer-input"><textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder={selectedSummary.currentWindow ? "像坐在电脑前一样输入指令…" : "继续这个会话…"} /><button type="submit" disabled={!draft.trim() || sending || Boolean(running[selectedSummary.key])} aria-label="发送">↑</button></div>
+              <p>{selectedSummary.currentWindow ? "发送时电脑会短暂切到 Codex 并自动按下回车" : mode === "safe" ? "默认拒绝需要额外授权的操作" : "会绕过本机权限确认，请谨慎使用"}</p>
             </form>
           </>
         ) : (
-          <div className="conversation-empty">
-            <div className="empty-symbol">R</div>
-            <h2>选择一个会话继续</h2>
-            <p>历史、当前进度和后续指令，会在手机与电脑之间实时同步。</p>
-            <div className="empty-badges"><span>端到端加密</span><span>Codex</span><span>Claude Code</span></div>
-          </div>
+          <div className="conversation-empty"><div className="empty-symbol">R</div><h2>选择一个项目继续</h2><p>你也可以打开“当前 Codex 窗口”，把手机输入直接发送到电脑上正在看的任务。</p><div className="empty-badges"><span>永久绑定</span><span>端到端加密</span><span>Codex</span><span>Claude Code</span></div></div>
         )}
       </section>
       {toast ? <div className="toast" role="status">{toast}</div> : null}

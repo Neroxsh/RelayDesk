@@ -4,15 +4,17 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
-import { randomInt } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { decryptJson, deriveSessionKey, encryptJson, generateDeviceKeys, randomToken, sha256 } from "./crypto.mjs";
 import { getSession, invalidateSessions, listSessions } from "./sessions.mjs";
-import { sendPrompt } from "./providers.mjs";
+import { sendPrompt, sendToCurrentCodex } from "./providers.mjs";
+import { CONTROL_URL, openControlPanel, startControlServer } from "./control-server.mjs";
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const HTTP_BRIDGE = path.join(path.dirname(fileURLToPath(import.meta.url)), "http-bridge.ps1");
 const command = process.argv[2] ?? "start";
+const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 let bridgeProcess;
 let bridgeSequence = 0;
@@ -70,26 +72,46 @@ async function saveConfig(config) {
   await rename(temporary, CONFIG_PATH);
 }
 
+function createPairKey() {
+  const raw = randomBytes(16);
+  const text = [...raw].map((byte) => PAIR_ALPHABET[byte % PAIR_ALPHABET.length]).join("");
+  return text.match(/.{1,4}/g).join("-");
+}
+
+function normalizePairKey(value) {
+  return String(value ?? "").toUpperCase().replace(/[^A-Z2-9]/g, "");
+}
+
 async function loadConfig() {
+  let config;
   try {
-    return JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+    config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
     const keys = await generateDeviceKeys();
-    const config = {
-      version: 1,
+    config = {
+      version: 2,
       relayUrl: "",
       siteToken: "",
       deviceId: `device_${randomToken(12)}`,
       agentToken: randomToken(32),
       deviceName: os.hostname(),
       keys,
+      pairKey: createPairKey(),
+      controlToken: randomToken(24),
       clients: {},
+      pendingPairs: {},
       cursor: 0,
     };
-    await saveConfig(config);
-    return config;
   }
+  let changed = false;
+  if (!config.pairKey) { config.pairKey = createPairKey(); changed = true; }
+  if (!config.controlToken) { config.controlToken = randomToken(24); changed = true; }
+  if (!config.pendingPairs) { config.pendingPairs = {}; changed = true; }
+  if (!config.clients) { config.clients = {}; changed = true; }
+  if (config.version !== 2) { config.version = 2; changed = true; }
+  if (changed || !config.createdAt) await saveConfig(config);
+  return config;
 }
 
 function normalizeRelay(value) {
@@ -134,17 +156,9 @@ async function register(config) {
       name: config.deviceName,
       platform: `${process.platform} ${os.release()}`,
       publicKey: config.keys.publicKey,
+      pairKeyHash: sha256(normalizePairKey(config.pairKey)),
     }),
   });
-}
-
-async function createPairCode(config) {
-  const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
-  await request(config, "/api/device/pair-code", {
-    method: "POST",
-    body: JSON.stringify({ codeHash: sha256(code) }),
-  });
-  return code;
 }
 
 const keyCache = new Map();
@@ -153,7 +167,7 @@ async function clientKey(config, clientId) {
   if (keyCache.has(clientId)) return keyCache.get(clientId);
   const client = config.clients[clientId];
   if (!client) throw new Error("未知手机设备");
-  const key = await deriveSessionKey(config.keys.privateKey, client.publicKey, client.codeHash);
+  const key = await deriveSessionKey(config.keys.privateKey, client.publicKey, client.saltHash ?? client.codeHash);
   keyCache.set(clientId, key);
   return key;
 }
@@ -173,11 +187,41 @@ let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
 
 async function publicSessions() {
-  return (await listSessions()).map((session) => {
+  const source = await listSessions();
+  const latestCodex = source.find((session) => session.provider === "codex");
+  const sessions = source.map((session) => {
     const result = { ...session, active: activeRuns.has(session.key) };
     delete result.filePath;
     return result;
   });
+  sessions.unshift({
+    id: "__current__",
+    key: "codex:__current__",
+    provider: "codex",
+    title: "当前 Codex 窗口",
+    cwd: latestCodex?.cwd ?? "",
+    projectName: "当前窗口",
+    updatedAt: latestCodex?.updatedAt ?? Date.now(),
+    recent: true,
+    active: activeRuns.has("codex:__current__"),
+    currentWindow: true,
+  });
+  return sessions;
+}
+
+async function currentCodexDetail() {
+  const source = await listSessions(true);
+  const latest = source.find((session) => session.provider === "codex");
+  const detail = latest ? await getSession("codex", latest.id) : { messages: [] };
+  return {
+    ...detail,
+    id: "__current__",
+    key: "codex:__current__",
+    provider: "codex",
+    title: "当前 Codex 窗口",
+    currentWindow: true,
+    sourceSessionId: latest?.id ?? null,
+  };
 }
 
 async function handleCommand(config, clientId, payload) {
@@ -192,7 +236,9 @@ async function handleCommand(config, clientId, payload) {
       return;
     }
     if (payload?.type === "session:get") {
-      const session = await getSession(payload.provider, payload.sessionId);
+      const session = payload.provider === "codex" && payload.sessionId === "__current__"
+        ? await currentCodexDetail()
+        : await getSession(payload.provider, payload.sessionId);
       subscriptions.set(clientId, session.key);
       await send(config, clientId, { type: "session:snapshot", requestId, session });
       return;
@@ -209,6 +255,21 @@ async function handleCommand(config, clientId, payload) {
       const prompt = String(payload.prompt ?? "").trim();
       if (!prompt || prompt.length > 12_000) throw new Error("指令需为 1–12000 个字符");
       const mode = payload.mode === "full" ? "full" : "safe";
+      if (payload.provider === "codex" && payload.sessionId === "__current__") {
+        const key = "codex:__current__";
+        if (activeRuns.has(key)) throw new Error("正在把上一条指令发送到 Codex");
+        const run = sendToCurrentCodex(prompt);
+        activeRuns.set(key, run);
+        await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: "window" });
+        try {
+          await run.completed;
+          await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
+        } finally {
+          activeRuns.delete(key);
+          invalidateSessions();
+        }
+        return;
+      }
       const session = await getSession(payload.provider, payload.sessionId);
       const key = `${session.provider}:${session.id}`;
       if (activeRuns.has(key)) throw new Error("这个会话仍在执行，请等待或先停止");
@@ -259,9 +320,17 @@ async function poll(config) {
   const data = await request(config, `/api/agent/poll?after=${config.cursor}`);
   for (const message of data.messages ?? []) {
     config.cursor = Math.max(config.cursor, Number(message.id) || 0);
+    if (message.kind === "pair_request") {
+      const pending = JSON.parse(message.envelope);
+      config.pendingPairs[pending.requestId] = pending;
+      await saveConfig(config);
+      openControlPanel();
+      console.log(`新的手机绑定请求：${pending.phoneName}`);
+      continue;
+    }
     if (message.kind === "pairing") {
       const paired = JSON.parse(message.envelope);
-      config.clients[paired.clientId] = { publicKey: paired.publicKey, codeHash: paired.codeHash };
+      config.clients[paired.clientId] = { publicKey: paired.publicKey, saltHash: paired.codeHash, name: "已绑定手机" };
       await saveConfig(config);
       await send(config, paired.clientId, {
         type: "agent:ready",
@@ -282,6 +351,70 @@ async function poll(config) {
     }
   }
   if (config.cursor !== startingCursor) await saveConfig(config);
+}
+
+function controlState(config) {
+  const current = Date.now();
+  return {
+    deviceName: config.deviceName,
+    pairKey: config.pairKey,
+    pending: Object.values(config.pendingPairs).filter((item) => item.expiresAt > current),
+    clients: Object.entries(config.clients).map(([clientId, client]) => ({
+      clientId,
+      name: client.name ?? "已绑定手机",
+      createdAt: client.createdAt ?? null,
+    })),
+  };
+}
+
+async function approvePair(config, body) {
+  const pending = config.pendingPairs[body?.requestId];
+  if (!pending || pending.expiresAt < Date.now()) throw new Error("连接请求不存在或已过期");
+  const result = await request(config, "/api/agent/pair/approve", {
+    method: "POST",
+    body: JSON.stringify({ requestId: pending.requestId }),
+  });
+  config.clients[result.clientId] = {
+    publicKey: pending.publicKey,
+    saltHash: pending.pairKeyHash,
+    name: pending.phoneName,
+    createdAt: Date.now(),
+  };
+  delete config.pendingPairs[pending.requestId];
+  keyCache.delete(result.clientId);
+  await saveConfig(config);
+  await send(config, result.clientId, {
+    type: "agent:ready",
+    device: { name: config.deviceName, platform: process.platform },
+  });
+  await send(config, result.clientId, { type: "sessions:snapshot", sessions: await publicSessions() });
+  return { ok: true };
+}
+
+async function rejectPair(config, body) {
+  const pending = config.pendingPairs[body?.requestId];
+  if (!pending) throw new Error("连接请求不存在");
+  await request(config, "/api/agent/pair/reject", {
+    method: "POST",
+    body: JSON.stringify({ requestId: pending.requestId }),
+  });
+  delete config.pendingPairs[pending.requestId];
+  await saveConfig(config);
+  return { ok: true };
+}
+
+async function revokeClient(config, body) {
+  const clientId = String(body?.clientId ?? "");
+  if (!config.clients[clientId]) throw new Error("手机设备不存在");
+  await request(config, "/api/agent/client/revoke", {
+    method: "POST",
+    body: JSON.stringify({ clientId }),
+  });
+  delete config.clients[clientId];
+  keyCache.delete(clientId);
+  subscriptions.delete(clientId);
+  await saveConfig(config);
+  return { ok: true };
 }
 
 async function syncExternalChanges(config) {
@@ -322,23 +455,27 @@ async function main() {
   await saveConfig(config);
   await register(config);
 
-  if (command === "pair") {
-    const code = await createPairCode(config);
-    console.log(`\n配对码：${code}\n10 分钟内在手机网页输入此号码。\n`);
+  if (command === "pair" || command === "control") {
+    console.log(`\n永久连接密钥：${config.pairKey}\n电脑控制中心：${CONTROL_URL}\n`);
+    openControlPanel();
     bridgeProcess?.stdin.end();
     return;
   }
   if (command !== "start") {
-    console.error("可用命令：start、pair");
+    console.error("可用命令：start、pair、control");
     process.exitCode = 2;
     return;
   }
 
   console.log(`RelayDesk 已连接：${config.deviceName}`);
-  if (Object.keys(config.clients).length === 0) {
-    const code = await createPairCode(config);
-    console.log(`首次配对码：${code}（10 分钟有效）`);
-  }
+  await startControlServer({
+    controlToken: config.controlToken,
+    getState: async () => controlState(config),
+    approve: async (body) => approvePair(config, body),
+    reject: async (body) => rejectPair(config, body),
+    revoke: async (body) => revokeClient(config, body),
+  });
+  console.log(`电脑控制中心：${CONTROL_URL}`);
 
   let delay = 1_200;
   while (true) {

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RelayDesk 电脑控制中心</title>
+  <style>
+    :root{color-scheme:light;--ink:#191b1f;--muted:#777d86;--line:#e5e6e8;--paper:#f3f3f0;--card:#fff;--lime:#c6ff46;--red:#b64c39}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+    main{width:min(920px,calc(100% - 32px));margin:0 auto;padding:42px 0 70px}.top{display:flex;align-items:center;gap:14px;margin-bottom:34px}.mark{width:44px;height:44px;display:grid;place-items:center;border-radius:13px;background:var(--lime);font-weight:900;transform:rotate(-4deg)}h1{margin:0;font-size:22px;letter-spacing:-.03em}.top p{margin:4px 0 0;color:var(--muted);font-size:12px}
+    .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}.card{padding:22px;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:0 12px 32px rgba(20,25,30,.04)}.card h2{margin:0 0 8px;font-size:14px}.card>p{margin:0 0 18px;color:var(--muted);font-size:12px;line-height:1.65}.key{display:flex;align-items:center;gap:10px;padding:15px;border-radius:13px;background:#171a1f;color:#fff;font:700 20px/1.2 Consolas,monospace;letter-spacing:.08em}.key span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}.key button,.action{border:0;border-radius:10px;cursor:pointer;font-weight:750}.key button{padding:8px 11px;background:var(--lime);color:#12150d;font-size:11px}.status{display:flex;gap:9px;align-items:center;margin-top:14px;color:#656b74;font-size:11px}.dot{width:8px;height:8px;border-radius:50%;background:#8bc824;box-shadow:0 0 0 4px rgba(139,200,36,.13)}
+    .wide{grid-column:1/-1}.list{display:grid;gap:10px}.empty{padding:24px;border:1px dashed #d9dcdf;border-radius:13px;color:#92979e;text-align:center;font-size:12px}.row{display:flex;align-items:center;gap:14px;padding:14px;border:1px solid var(--line);border-radius:13px}.phone{width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:#f0f1ee;font-size:17px}.copy{min-width:0;flex:1}.copy strong,.copy span{display:block}.copy strong{font-size:12px}.copy span{margin-top:4px;color:#8b9199;font-size:10px}.actions{display:flex;gap:7px}.action{height:34px;padding:0 12px;background:#eceee9;color:#4b5159;font-size:10px}.action.primary{background:var(--lime);color:#17200c}.action.danger{background:#fff0ed;color:var(--red)}.notice{display:none;margin:0 0 16px;padding:11px 13px;border-radius:11px;background:#15191f;color:#fff;font-size:11px}.notice.show{display:block}
+    @media(max-width:700px){main{padding-top:24px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.row{align-items:flex-start;flex-wrap:wrap}.actions{width:100%}.action{flex:1}.key{font-size:15px}}
+  </style>
+</head>
+<body data-token="__CONTROL_TOKEN__">
+  <main>
+    <div class="top"><div class="mark">R</div><div><h1>RelayDesk 电脑控制中心</h1><p>这个页面只在本机开放，用于确认手机和解除永久绑定。</p></div></div>
+    <div id="notice" class="notice"></div>
+    <div class="grid">
+      <section class="card"><h2>永久连接密钥</h2><p>在手机 RelayDesk 输入一次。密钥不会上传明文，电脑确认后才会完成绑定。</p><div class="key"><span id="pair-key">读取中…</span><button id="copy-key">复制</button></div><div class="status"><span class="dot"></span><span id="device-status">电脑服务正在运行</span></div></section>
+      <section class="card"><h2>手机怎么连接</h2><p>1. 手机打开 RelayDesk<br>2. 输入上方密钥并提交<br>3. 回到此页点击“确认绑定”<br>4. 以后直接打开，无需再次认证</p></section>
+      <section class="card wide"><h2>等待确认</h2><p>只确认你本人刚刚发起的设备。请求 10 分钟后自动失效。</p><div id="pending" class="list"><div class="empty">当前没有待确认的手机</div></div></section>
+      <section class="card wide"><h2>已永久绑定</h2><p>解除后，该手机保存的凭据立即失效，需要重新输入密钥并由电脑确认。</p><div id="clients" class="list"><div class="empty">尚未绑定手机</div></div></section>
+    </div>
+  </main>
+  <script>
+    const token=document.body.dataset.token;
+    const notice=document.getElementById('notice');
+    function escapeHtml(value){return String(value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+    function show(message){notice.textContent=message;notice.classList.add('show');setTimeout(function(){notice.classList.remove('show')},2600)}
+    async function api(path,body){const response=await fetch(path,{method:body?'POST':'GET',headers:{'content-type':'application/json','x-relaydesk-control':token},body:body?JSON.stringify(body):undefined});const data=await response.json();if(!response.ok)throw new Error(data.error||'操作失败');return data}
+    async function refresh(){try{const state=await api('/api/state');document.getElementById('pair-key').textContent=state.pairKey;document.getElementById('device-status').textContent=state.deviceName+' · 已连接公网中继';renderPending(state.pending||[]);renderClients(state.clients||[])}catch(error){show(error.message)}}
+    function renderPending(items){const root=document.getElementById('pending');if(!items.length){root.innerHTML='<div class="empty">当前没有待确认的手机</div>';return}root.innerHTML=items.map(function(item){return '<div class="row"><div class="phone">📱</div><div class="copy"><strong>'+escapeHtml(item.phoneName)+'</strong><span>刚刚请求连接 · 请核对是否由你本人发起</span></div><div class="actions"><button class="action" data-reject="'+item.requestId+'">拒绝</button><button class="action primary" data-approve="'+item.requestId+'">确认绑定</button></div></div>'}).join('')}
+    function renderClients(items){const root=document.getElementById('clients');if(!items.length){root.innerHTML='<div class="empty">尚未绑定手机</div>';return}root.innerHTML=items.map(function(item){return '<div class="row"><div class="phone">✓</div><div class="copy"><strong>'+escapeHtml(item.name||'已绑定手机')+'</strong><span>永久绑定 · '+escapeHtml(item.clientId.slice(-8))+'</span></div><div class="actions"><button class="action danger" data-revoke="'+item.clientId+'">解除绑定</button></div></div>'}).join('')}
+    document.addEventListener('click',async function(event){const button=event.target.closest('button');if(!button)return;try{if(button.id==='copy-key'){await navigator.clipboard.writeText(document.getElementById('pair-key').textContent);show('连接密钥已复制');return}if(button.dataset.approve){await api('/api/approve',{requestId:button.dataset.approve});show('手机已永久绑定')}if(button.dataset.reject){await api('/api/reject',{requestId:button.dataset.reject});show('已拒绝连接请求')}if(button.dataset.revoke){if(!confirm('确定解除这台手机的永久绑定吗？'))return;await api('/api/revoke',{clientId:button.dataset.revoke});show('已解除绑定')}await refresh()}catch(error){show(error.message)}})
+    refresh();setInterval(refresh,2000);
+  </script>
+</body>
+</html>

@@ -1,6 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const CODEX_WINDOW_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-window.ps1");
 
 function resolveOnWindows(name) {
   const script = `$c=Get-Command ${name} -ErrorAction Stop | Select-Object -First 1; $c.Source`;
@@ -124,6 +127,45 @@ export function sendPrompt(session, prompt, mode, onEvent) {
       } else {
         child.kill("SIGTERM");
       }
+    },
+  };
+}
+
+export function sendToCurrentCodex(prompt) {
+  if (process.platform !== "win32") throw new Error("当前 Codex 窗口控制只支持 Windows");
+  const child = spawn(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Sta",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      CODEX_WINDOW_SCRIPT,
+      "-PromptBase64",
+      Buffer.from(prompt, "utf8").toString("base64"),
+    ],
+    { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  const completed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      let result = null;
+      try { result = JSON.parse(stdout.trim().split(/\r?\n/).at(-1) ?? "{}"); } catch { /* use stderr below */ }
+      if (code === 0 && result?.ok) resolve(result);
+      else reject(new Error(result?.error ?? stderr.trim() ?? "无法把指令发送到当前 Codex 窗口"));
+    });
+  });
+  return {
+    pid: child.pid,
+    completed,
+    stop() {
+      if (child.exitCode === null) child.kill();
     },
   };
 }
