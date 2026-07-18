@@ -12,11 +12,11 @@ $runner = Join-Path $PSScriptRoot "run-agent.ps1"
 $relay = $RelayUrl.TrimEnd("/")
 
 if ($relay -notmatch "^https://" -and $relay -notmatch "^http://(127\.0\.0\.1|localhost)(:\d+)?$") {
-  throw "公网中继必须使用 HTTPS。"
+  throw "Public relay URLs must use HTTPS."
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  throw "未找到 Node.js，请先安装 Node.js 22 或更高版本。"
+  throw "Node.js 22 or newer is required."
 }
 
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"

@@ -1,4 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { randomInt } from "node:crypto";
@@ -8,7 +11,50 @@ import { sendPrompt } from "./providers.mjs";
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
+const HTTP_BRIDGE = path.join(path.dirname(fileURLToPath(import.meta.url)), "http-bridge.ps1");
 const command = process.argv[2] ?? "start";
+
+let bridgeProcess;
+let bridgeSequence = 0;
+const bridgePending = new Map();
+
+function powershellRequest(url, options) {
+  if (!bridgeProcess || bridgeProcess.exitCode !== null) {
+    bridgeProcess = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", HTTP_BRIDGE],
+      { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const lines = createInterface({ input: bridgeProcess.stdout });
+    lines.on("line", (line) => {
+      try {
+        const result = JSON.parse(line);
+        const pending = bridgePending.get(result.id);
+        if (!pending) return;
+        bridgePending.delete(result.id);
+        pending.resolve(result);
+      } catch {
+        // Ignore non-protocol output from Windows PowerShell.
+      }
+    });
+    bridgeProcess.once("exit", () => {
+      for (const pending of bridgePending.values()) pending.reject(new Error("Windows network bridge stopped"));
+      bridgePending.clear();
+      bridgeProcess = null;
+    });
+  }
+  const id = ++bridgeSequence;
+  return new Promise((resolve, reject) => {
+    bridgePending.set(id, { resolve, reject });
+    bridgeProcess.stdin.write(`${JSON.stringify({
+      id,
+      url,
+      method: options.method ?? "GET",
+      headers: options.headers ?? {},
+      body: options.body ?? null,
+    })}\n`);
+  });
+}
 
 function argument(name) {
   const inline = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -51,17 +97,30 @@ function normalizeRelay(value) {
 }
 
 async function request(config, pathname, options = {}) {
-  const response = await fetch(`${config.relayUrl}${pathname}`, {
-    ...options,
-    headers: {
-      "content-type": "application/json",
-      ...(config.siteToken ? { "OAI-Sites-Authorization": `Bearer ${config.siteToken}` } : {}),
-      ...(options.auth === false ? {} : { authorization: `Bearer ${config.agentToken}` }),
-      ...(options.headers ?? {}),
-    },
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error ?? `中继服务返回 ${response.status}`);
+  const headers = {
+    "content-type": "application/json",
+    ...(config.siteToken ? { "OAI-Sites-Authorization": `Bearer ${config.siteToken}` } : {}),
+    ...(options.auth === false ? {} : { authorization: `Bearer ${config.agentToken}` }),
+    ...(options.headers ?? {}),
+  };
+  let status;
+  let responseBody;
+  if (process.platform === "win32") {
+    const result = await powershellRequest(`${config.relayUrl}${pathname}`, { ...options, headers });
+    status = result.status;
+    responseBody = result.body;
+  } else {
+    const response = await fetch(`${config.relayUrl}${pathname}`, { ...options, headers });
+    status = response.status;
+    responseBody = await response.text();
+  }
+  let data = {};
+  try {
+    data = responseBody ? JSON.parse(responseBody) : {};
+  } catch {
+    // Preserve a useful status error when a gateway returns HTML.
+  }
+  if (status < 200 || status >= 300) throw new Error(data.error ?? `中继服务返回 ${status}`);
   return data;
 }
 
@@ -266,6 +325,7 @@ async function main() {
   if (command === "pair") {
     const code = await createPairCode(config);
     console.log(`\n配对码：${code}\n10 分钟内在手机网页输入此号码。\n`);
+    bridgeProcess?.stdin.end();
     return;
   }
   if (command !== "start") {
