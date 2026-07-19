@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+[System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy
 
 function Write-ProtocolResult($Value) {
   [Console]::Out.WriteLine(($Value | ConvertTo-Json -Compress -Depth 10))

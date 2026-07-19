@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "relaydesk-edgeone-bridge",
+  "main": "cloudflare-bridge/worker.js",
+  "compatibility_date": "2026-07-19",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "relay.xingshihao.site/*",
+      "zone_name": "xingshihao.site"
+    }
+  ]
+}
