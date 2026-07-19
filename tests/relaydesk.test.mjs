@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { decryptJson, deriveSessionKey, encryptJson, generateDeviceKeys, sha256 } from "../agent/crypto.mjs";
-import { parseCodexTranscript } from "../agent/sessions.mjs";
+import { parseCodexTranscript, readSessionTranscript } from "../agent/sessions.mjs";
 
 test("desktop and phone derive the same end-to-end key", async () => {
   const desktop = await generateDeviceKeys();
@@ -46,6 +48,28 @@ test("an unfinished Codex task remains visibly in progress", () => {
   ]);
   assert.equal(transcript.state, "working");
   assert.equal(transcript.activity.at(-1).status, "running");
+});
+
+test("long Codex transcripts keep user context while new output is appended", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "relaydesk-transcript-test-"));
+  const file = path.join(directory, "session.jsonl");
+  const row = (value) => `${JSON.stringify(value)}\n`;
+  try {
+    await writeFile(file, [
+      row({ timestamp: "2026-07-19T00:00:00Z", type: "event_msg", payload: { type: "user_message", message: "保留这条用户消息" } }),
+      row({ timestamp: "2026-07-19T00:00:01Z", type: "event_msg", payload: { type: "agent_message", message: "第一条回答" } }),
+      row({ timestamp: "2026-07-19T00:00:02Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "large", output: "x".repeat(5 * 1024 * 1024) } }),
+    ].join(""), "utf8");
+    const initial = await readSessionTranscript("codex", file);
+    assert.equal(initial.messages.some((message) => message.role === "user" && message.content === "保留这条用户消息"), true);
+
+    await appendFile(file, row({ timestamp: "2026-07-19T00:00:03Z", type: "event_msg", payload: { type: "agent_message", message: "追加后的回答" } }), "utf8");
+    const updated = await readSessionTranscript("codex", file);
+    assert.equal(updated.messages.some((message) => message.role === "user" && message.content === "保留这条用户消息"), true);
+    assert.equal(updated.messages.at(-1).content, "追加后的回答");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("the mobile UI keeps navigation and execution state within reach", async () => {

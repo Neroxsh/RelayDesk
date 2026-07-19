@@ -9,9 +9,13 @@ const CLAUDE_ROOT = path.join(os.homedir(), ".claude", "projects");
 const CODEX_INDEX = process.env.CODEX_HOME
   ? path.join(process.env.CODEX_HOME, "session_index.jsonl")
   : path.join(os.homedir(), ".codex", "session_index.jsonl");
-const MAX_HISTORY_BYTES = 3 * 1024 * 1024;
+const INITIAL_HISTORY_BYTES = 4 * 1024 * 1024;
+const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
+const MAX_INCREMENT_BYTES = 4 * 1024 * 1024;
+const RECENT_ROW_LIMIT = 1_500;
 
 let cache = { at: 0, sessions: [] };
+const transcriptCache = new Map();
 
 async function walk(directory) {
   const files = [];
@@ -44,13 +48,19 @@ async function readHead(filePath, bytes = 256 * 1024) {
   return readSlice(filePath, 0, Math.min(bytes, info.size));
 }
 
-async function readTail(filePath, bytes = MAX_HISTORY_BYTES) {
+async function readTail(filePath, bytes = INITIAL_HISTORY_BYTES) {
   const info = await stat(filePath);
   const length = Math.min(bytes, info.size);
   const text = await readSlice(filePath, info.size - length, length);
   if (length === info.size) return text;
   const firstBreak = text.indexOf("\n");
   return firstBreak >= 0 ? text.slice(firstBreak + 1) : "";
+}
+
+function completeLines(text) {
+  const lastBreak = text.lastIndexOf("\n");
+  if (lastBreak < 0) return { complete: "", carry: text };
+  return { complete: text.slice(0, lastBreak + 1), carry: text.slice(lastBreak + 1) };
 }
 
 function parseLines(text) {
@@ -301,7 +311,7 @@ export function parseCodexTranscript(rows) {
   }
   const messages = eventMessages.length ? eventMessages : responseMessages;
   if (!sawTaskSignal) state = openCalls.size ? "working" : "idle";
-  return { messages, activity: activity.slice(-40), state };
+  return { messages, activity: activity.slice(-40), state, hasTaskSignal: sawTaskSignal };
 }
 
 export function parseClaudeTranscript(rows) {
@@ -317,15 +327,89 @@ export function parseClaudeTranscript(rows) {
       }
     }
   }
-  return { messages, activity: activity.slice(-40), state: "idle" };
+  return { messages, activity: activity.slice(-40), state: "idle", hasTaskSignal: false };
+}
+
+function mergeMessages(previous, incoming) {
+  const result = [...previous];
+  const seen = new Set(previous.map((message) => `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`));
+  for (const message of incoming) {
+    const signature = `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    result.push(message);
+  }
+  return result.slice(-120);
+}
+
+function parserFor(provider) {
+  return provider === "codex" ? parseCodexTranscript : parseClaudeTranscript;
+}
+
+function enoughContext(transcript, fileSize, bytes) {
+  if (bytes >= fileSize || bytes >= MAX_HISTORY_BYTES) return true;
+  const users = transcript.messages.filter((message) => message.role === "user").length;
+  return users >= 1 && transcript.messages.length >= 8;
+}
+
+async function initialTranscript(provider, filePath, info) {
+  const parse = parserFor(provider);
+  let bytes = Math.min(INITIAL_HISTORY_BYTES, info.size);
+  let rows = [];
+  let transcript = parse(rows);
+  let carry = "";
+  while (true) {
+    const lines = completeLines(await readTail(filePath, bytes));
+    rows = parseLines(lines.complete);
+    transcript = parse(rows);
+    carry = lines.carry;
+    if (enoughContext(transcript, info.size, bytes)) break;
+    bytes = Math.min(info.size, MAX_HISTORY_BYTES, bytes * 2);
+  }
+  return {
+    size: info.size,
+    carry,
+    recentRows: rows.slice(-RECENT_ROW_LIMIT),
+    transcript: { ...transcript, messages: transcript.messages.slice(-120) },
+  };
+}
+
+async function cachedTranscript(provider, filePath) {
+  const info = await stat(filePath);
+  const previous = transcriptCache.get(filePath);
+  if (previous?.size === info.size) return previous.transcript;
+
+  if (previous && info.size > previous.size && info.size - previous.size <= MAX_INCREMENT_BYTES) {
+    const appended = previous.carry + await readSlice(filePath, previous.size, info.size - previous.size);
+    const lines = completeLines(appended);
+    const newRows = parseLines(lines.complete);
+    const recentRows = [...previous.recentRows, ...newRows].slice(-RECENT_ROW_LIMIT);
+    const recent = parserFor(provider)(recentRows);
+    const transcript = {
+      ...recent,
+      messages: mergeMessages(previous.transcript.messages, recent.messages),
+      activity: recent.activity.length ? recent.activity : previous.transcript.activity,
+      state: recent.hasTaskSignal || recent.state === "working" ? recent.state : previous.transcript.state,
+    };
+    transcriptCache.set(filePath, { size: info.size, carry: lines.carry, recentRows, transcript });
+    return transcript;
+  }
+
+  const initial = await initialTranscript(provider, filePath, info);
+  transcriptCache.set(filePath, initial);
+  return initial.transcript;
+}
+
+export async function readSessionTranscript(provider, filePath) {
+  if (!["codex", "claude"].includes(provider)) throw new Error("不支持的会话类型");
+  return cachedTranscript(provider, filePath);
 }
 
 export async function getSession(provider, id) {
   const sessions = await listSessions(true);
   const session = sessions.find((item) => item.provider === provider && item.id === id);
   if (!session) throw new Error("会话不存在或已被移动");
-  const rows = parseLines(await readTail(session.filePath));
-  const transcript = provider === "codex" ? parseCodexTranscript(rows) : parseClaudeTranscript(rows);
+  const transcript = await readSessionTranscript(provider, session.filePath);
   return {
     ...session,
     filePath: undefined,
