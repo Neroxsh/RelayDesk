@@ -6,6 +6,7 @@ import {
   createPhoneKeys,
   deriveSessionKey,
   exportSessionKey,
+  requestId,
   sha256,
 } from "../remote-crypto";
 import {
@@ -16,6 +17,34 @@ import {
   STORAGE_KEY,
 } from "../relaydesk-meta";
 import type { PendingPair, StoredPairing } from "../relaydesk-types";
+
+type PairResponse<T> = { ok: boolean; status: number; data: T };
+
+async function fetchPairJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<PairResponse<T>> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const response = await fetch(input, init);
+      const text = await response.text();
+      let data: T;
+      try {
+        data = JSON.parse(text) as T;
+      } catch {
+        if (attempt < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
+          continue;
+        }
+        throw new Error("连接服务暂时繁忙，请稍后再试");
+      }
+      if (response.ok || (response.status < 500 && response.status !== 429)) {
+        return { ok: response.ok, status: response.status, data };
+      }
+    } catch (error) {
+      if (attempt === 3) throw new Error("连接服务暂时繁忙，请稍后再试", { cause: error });
+    }
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
+  }
+  throw new Error("连接服务暂时繁忙，请稍后再试");
+}
 
 export function PairingScreen({ onPaired }: { onPaired: (pairing: StoredPairing) => void }) {
   const [keyText, setKeyText] = useState("");
@@ -44,17 +73,17 @@ export function PairingScreen({ onPaired }: { onPaired: (pairing: StoredPairing)
     let timer: ReturnType<typeof setTimeout>;
     const check = async () => {
       try {
-        const response = await fetch(`/api/pair/status?requestId=${encodeURIComponent(pending.requestId)}`, {
-          headers: { authorization: `Bearer ${pending.pollToken}` },
-          cache: "no-store",
-        });
-        const data = await response.json() as {
+        const response = await fetchPairJson<{
           status?: string;
           error?: string;
           clientId?: string;
           clientToken?: string;
           device?: { id: string; name: string; platform: string; publicKey: JsonWebKey };
-        };
+        }>(`/api/pair/status?requestId=${encodeURIComponent(pending.requestId)}`, {
+          headers: { authorization: `Bearer ${pending.pollToken}` },
+          cache: "no-store",
+        });
+        const data = response.data;
         if (!response.ok) throw new Error(data.error ?? "无法读取连接状态");
         if (data.status === "approved" && data.clientId && data.clientToken && data.device) {
           const sessionKey = await deriveSessionKey(pending.privateKey, data.device.publicKey, pending.pairKeyHash);
@@ -78,7 +107,8 @@ export function PairingScreen({ onPaired }: { onPaired: (pairing: StoredPairing)
           return;
         }
       } catch (pollError) {
-        if (!stopped) setError(pollError instanceof Error ? pollError.message : "连接中断，请重试");
+        const message = pollError instanceof Error ? pollError.message : "";
+        if (!stopped && !message.includes("暂时繁忙")) setError(message || "无法读取连接状态");
       }
       if (!stopped) timer = setTimeout(check, 1_200);
     };
@@ -95,18 +125,23 @@ export function PairingScreen({ onPaired }: { onPaired: (pairing: StoredPairing)
     try {
       const pairKeyHash = await sha256(normalized);
       const keys = await createPhoneKeys();
-      const response = await fetch("/api/pair/request", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pairKeyHash, publicKey: keys.publicKey, phoneName: phoneName() }),
-      });
-      const data = await response.json() as {
+      const response = await fetchPairJson<{
         error?: string;
         requestId?: string;
         pollToken?: string;
         deviceName?: string;
         expiresAt?: number;
-      };
+      }>("/api/pair/request", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pairKeyHash,
+          publicKey: keys.publicKey,
+          phoneName: phoneName(),
+          requestNonce: requestId(),
+        }),
+      });
+      const data = response.data;
       if (!response.ok || !data.requestId || !data.pollToken || !data.expiresAt) {
         throw new Error(data.error ?? "无法发送连接请求");
       }

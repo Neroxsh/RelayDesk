@@ -67,8 +67,8 @@ function validId(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{8,180}$/.test(value);
 }
 
-function createPairRequestId(deviceId) {
-  return `pair_${deviceId.length}_${deviceId}_${randomToken(12)}`;
+function createPairRequestId(deviceId, suffix = randomToken(12)) {
+  return `pair_${deviceId.length}_${deviceId}_${suffix}`;
 }
 
 function pairRequestDeviceId(requestId) {
@@ -224,15 +224,26 @@ async function registerDevice(request) {
 }
 
 async function requestPair(request) {
-  if (!(await rateLimit(request))) return jsonError("尝试次数过多，请稍后再试", 429);
   const body = await readJson(request, 32_000);
   if (!validHash(body.pairKeyHash)) return jsonError("连接密钥格式错误");
   if (!validPublicKey(body.publicKey)) return jsonError("手机端密钥无效");
+  const requestNonce = typeof body.requestNonce === "string" && /^[A-Za-z0-9_-]{8,80}$/.test(body.requestNonce)
+    ? body.requestNonce
+    : (await sha256(`${body.pairKeyHash}:${body.publicKey.x}:${body.publicKey.y}`)).slice(0, 24);
   const owner = await getJson(key.pairKey(body.pairKeyHash));
   const device = owner?.deviceId ? await getJson(key.device(owner.deviceId)) : null;
   if (!device) return jsonError("连接密钥不存在，请检查后重试", 404);
-  const requestId = createPairRequestId(device.id);
-  const pollToken = randomToken(32);
+  const nonceHash = await sha256(`${device.id}:${requestNonce}`);
+  const requestId = createPairRequestId(device.id, nonceHash.slice(0, 24));
+  const pollToken = await sha256(`${requestNonce}:${body.pairKeyHash}:${device.agentTokenHash}`);
+  const existing = await getJson(key.pending(device.id, requestId));
+  if (existing?.expiresAt > now()
+    && existing.pairKeyHash === body.pairKeyHash
+    && existing.publicKey?.x === body.publicKey.x
+    && existing.publicKey?.y === body.publicKey.y) {
+    return json({ requestId, pollToken, deviceName: device.name, expiresAt: existing.expiresAt });
+  }
+  if (!(await rateLimit(request))) return jsonError("尝试次数过多，请稍后再试", 429);
   const timestamp = now();
   const pending = {
     id: requestId,

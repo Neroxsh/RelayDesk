@@ -211,8 +211,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .tool-message { margin: 0 0 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--muted); font-size: 11px; }
 .tool-message summary { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; }
 .tool-message > div { padding: 0 12px 12px; overflow-wrap: anywhere; font: 10px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.thinking-line { display: flex; align-items: center; gap: 9px; margin: 5px 0 28px; color: var(--muted); }
-.thinking-line p { margin: 0; font-size: 12px; }
+.reply-pulse { width: fit-content; display: flex; align-items: center; gap: 9px; margin: 5px 0 28px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); color: var(--muted); }
+.reply-pulse > .provider-dot { width: 7px; height: 7px; flex-basis: 7px; }
+.reply-pulse-dots { display: flex; align-items: center; gap: 4px; height: 12px; }
+.reply-pulse-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: reply-dot 1.15s ease-in-out infinite; }
+.reply-pulse-dots i:nth-child(2) { animation-delay: .14s; }
+.reply-pulse-dots i:nth-child(3) { animation-delay: .28s; }
+.reply-pulse p { margin: 0; font-size: 11px; }
+@keyframes reply-dot { 0%, 60%, 100% { transform: translateY(0); opacity: .35; } 30% { transform: translateY(-3px); opacity: 1; } }
 .message-end { height: 1px; }
 
 .composer { position: absolute; z-index: 20; left: 50%; bottom: max(22px, env(safe-area-inset-bottom)); width: min(calc(100% - 48px), 820px); transform: translateX(-50%); padding: 10px; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow); }

@@ -172,7 +172,7 @@ function stableSessionSnapshot(session) {
 
 function isRelayTimeout(error) {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /aborted|aborterror|timeout|timed out/i.test(message);
+  return /aborted|aborterror|timeout|timed out|中继服务返回\s*5\d\d|relay[^\n]*\s5\d\d/i.test(message);
 }
 
 function userFacingError(error) {

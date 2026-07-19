@@ -100,7 +100,13 @@ export function ConversationView({
           </article>
         ))}
 
-        {isWorking && !activity.length ? <div className="thinking-line"><LoaderCircle className="spin" size={16} /><p>{waiting ? `${providerName(session.provider)} 正在处理` : "正在同步进度"}</p></div> : null}
+        {isWorking ? (
+          <div className="reply-pulse" role="status" aria-live="polite">
+            <span className={`provider-dot ${session.provider}`} />
+            <span className="reply-pulse-dots" aria-hidden="true"><i /><i /><i /></span>
+            <p>{waiting ? `${providerName(session.provider)} 正在思考` : "正在继续回复"}</p>
+          </div>
+        ) : null}
         <div ref={messageEndRef} className="message-end" />
       </div>
 

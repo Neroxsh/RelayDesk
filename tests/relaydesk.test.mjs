@@ -84,6 +84,8 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
     readFile(new URL("../drizzle/0002_cuddly_mephistopheles.sql", import.meta.url), "utf8"),
   ]);
   assert.match(pairing, /16 位配对码/);
+  assert.match(pairing, /fetchPairJson/);
+  assert.match(pairing, /requestNonce/);
   assert.match(browser, /Codex/);
   assert.match(meta, /Claude Code/);
   assert.match(conversation, /返回会话列表/);
@@ -94,6 +96,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(conversation, /任务进行中/);
   assert.match(conversation, /需确认/);
   assert.match(conversation, /自动执行/);
+  assert.match(conversation, /reply-pulse/);
   assert.match(page, /session:watch/);
   assert.match(page, /mergeSessionMessages/);
   assert.match(page, /attempt < 4/);
@@ -103,6 +106,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(page, /updateViaCache: "none"/);
   assert.match(css, /\.app-shell\.has-selection \.conversation-panel \{ position: fixed; inset: 0/);
   assert.match(css, /font-size: 16px/);
+  assert.match(css, /@keyframes reply-dot/);
   assert.equal(JSON.parse(manifest).display, "standalone");
   assert.match(migration, /pending_pairs/);
 });
@@ -125,6 +129,7 @@ test("the agent persists and renews a selected-session subscription", async () =
   assert.match(agent, /stableSessionSnapshot/);
   assert.match(agent, /sendBestEffort/);
   assert.match(agent, /claimMutatingRequest/);
+  assert.match(agent, /中继服务返回\\s\*5\\d\\d/);
 });
 
 test("the desktop bridge never exposes an arbitrary shell endpoint", async () => {
@@ -161,6 +166,7 @@ test("the mainland entry runs the RelayDesk API on strongly consistent storage",
   assert.match(proxy, /@edgeone\/pages-blob/);
   assert.match(proxy, /consistency: "strong"/);
   assert.match(proxy, /DEVICE_ONLINE_WINDOW = 60_000/);
+  assert.match(proxy, /requestNonce/);
   assert.match(proxy, /path === "\/api\/client\/send"/);
   assert.match(proxy, /path === "\/api\/agent\/import"/);
   assert.doesNotMatch(proxy, /chatgpt\.site/);
