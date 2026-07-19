@@ -49,6 +49,8 @@ relaydesk start                 # 在当前终端前台运行
 relaydesk setup --relay URL     # 使用自己的中继地址
 ```
 
+如果手机已经连接、但看不到电脑上的会话，请打开电脑控制中心。页面底部会显示 Codex 和 Claude Code 实际读取的目录、原始文件数和已识别会话数。RelayDesk 会自动检查当前用户的默认目录，也可以在那里填写自定义的 `.codex` / `.claude` 数据目录；使用 WSL 时可填写对应的 `\\wsl.localhost\...` 路径。
+
 从源码运行时，也可以使用 `npm run setup` 和 `npm run agent -- --relay URL`。
 
 ## 它如何工作

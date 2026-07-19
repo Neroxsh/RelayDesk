@@ -136,6 +136,11 @@ export default function Home() {
 
     if (payload.type === "sessions:snapshot" && Array.isArray(payload.sessions)) {
       setSessions(payload.sessions as SessionSummary[]);
+      void remoteSend({
+        type: "sessions:ack",
+        count: payload.sessions.length,
+        requestId: requestId(),
+      }).catch(() => undefined);
       return;
     }
 
@@ -220,7 +225,7 @@ export default function Home() {
       setToast(String(payload.error ?? "请求失败"));
       setRunning({});
     }
-  }, []);
+  }, [remoteSend]);
 
   useEffect(() => {
     if (!pairing) return;
@@ -263,8 +268,13 @@ export default function Home() {
       }
     };
     void remoteSend({ type: "sessions:list", requestId: requestId() }).catch(() => undefined);
+    const sessionTimer = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void remoteSend({ type: "sessions:list", requestId: requestId() }).catch(() => undefined);
+      }
+    }, 30_000);
     void poll();
-    return () => { stopped = true; clearTimeout(timer); };
+    return () => { stopped = true; clearTimeout(timer); clearInterval(sessionTimer); };
   }, [pairing, handlePayload, remoteSend]);
 
   const currentWindow = sessions.find((session) => session.currentWindow);

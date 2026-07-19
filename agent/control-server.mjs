@@ -32,7 +32,7 @@ function isLoopback(address) {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
-export async function startControlServer({ controlToken, getState, approve, reject, revoke }) {
+export async function startControlServer({ controlToken, getState, approve, reject, revoke, updateSettings }) {
   const template = await readFile(CONTROL_HTML, "utf8");
   const server = http.createServer(async (request, response) => {
     try {
@@ -53,9 +53,15 @@ export async function startControlServer({ controlToken, getState, approve, reje
         reply(response, 200, await getState());
         return;
       }
-      if (request.method === "POST" && ["/api/approve", "/api/reject", "/api/revoke"].includes(url.pathname)) {
+      if (request.method === "POST" && ["/api/approve", "/api/reject", "/api/revoke", "/api/settings"].includes(url.pathname)) {
         const body = await readBody(request);
-        const handler = url.pathname === "/api/approve" ? approve : url.pathname === "/api/reject" ? reject : revoke;
+        const handler = url.pathname === "/api/approve"
+          ? approve
+          : url.pathname === "/api/reject"
+            ? reject
+            : url.pathname === "/api/revoke"
+              ? revoke
+              : updateSettings;
         reply(response, 200, await handler(body));
         return;
       }

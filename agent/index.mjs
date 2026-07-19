@@ -3,7 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { decryptJson, deriveSessionKey, encryptJson, generateDeviceKeys, randomToken, sha256 } from "./crypto.mjs";
-import { getSession, invalidateSessions, listSessions } from "./sessions.mjs";
+import {
+  configureSessionRoots,
+  getSession,
+  invalidateSessions,
+  listSessions,
+  normalizeProviderHome,
+  sessionDiagnostics,
+} from "./sessions.mjs";
 import { openCodexSession, sendPrompt, sendToCodexSession, sendToCurrentCodex } from "./providers.mjs";
 import { CONTROL_URL, openControlPanel, startControlServer } from "./control-server.mjs";
 
@@ -115,6 +122,7 @@ async function register(config) {
 }
 
 const keyCache = new Map();
+const clientActivity = new Map();
 
 async function clientKey(config, clientId) {
   if (keyCache.has(clientId)) return keyCache.get(clientId);
@@ -131,6 +139,12 @@ async function send(config, clientId, payload) {
   await request(config, "/api/agent/send", {
     method: "POST",
     body: JSON.stringify({ clientId, envelope }),
+  });
+  const previous = clientActivity.get(clientId) ?? {};
+  clientActivity.set(clientId, {
+    ...previous,
+    lastDeliveredAt: Date.now(),
+    lastDeliveredType: payload?.type ?? "unknown",
   });
 }
 
@@ -284,7 +298,21 @@ async function watchSession(config, clientId, session) {
 
 async function handleCommand(config, clientId, payload) {
   const requestId = payload?.requestId ?? randomToken(8);
+  const previousActivity = clientActivity.get(clientId) ?? {};
+  clientActivity.set(clientId, {
+    ...previousActivity,
+    lastRequestAt: Date.now(),
+    lastRequestType: payload?.type ?? "unknown",
+  });
   try {
+    if (payload?.type === "sessions:ack") {
+      clientActivity.set(clientId, {
+        ...(clientActivity.get(clientId) ?? {}),
+        lastAcknowledgedAt: Date.now(),
+        acknowledgedSessions: Math.max(0, Number(payload.count) || 0),
+      });
+      return;
+    }
     if (payload?.type === "ping") {
       await send(config, clientId, { type: "pong", requestId, at: Date.now() });
       return;
@@ -495,18 +523,37 @@ async function poll(config) {
   if (config.cursor !== startingCursor) await saveConfig(config);
 }
 
-function controlState(config) {
+async function controlState(config) {
   const current = Date.now();
   return {
     deviceName: config.deviceName,
     pairKey: config.pairKey,
+    providers: await sessionDiagnostics(),
     pending: Object.values(config.pendingPairs).filter((item) => item.expiresAt > current),
     clients: Object.entries(config.clients).map(([clientId, client]) => ({
       clientId,
       name: client.name ?? "已绑定手机",
       createdAt: client.createdAt ?? null,
+      activity: clientActivity.get(clientId) ?? null,
     })),
   };
+}
+
+async function updateProviderHomes(config, body) {
+  const codexHome = normalizeProviderHome("codex", body?.codexHome);
+  const claudeHome = normalizeProviderHome("claude", body?.claudeHome);
+  if (codexHome.length > 1_000 || claudeHome.length > 1_000) throw new Error("目录路径过长");
+  config.codexHome = codexHome;
+  config.claudeHome = claudeHome;
+  configureSessionRoots({ codexHome, claudeHome });
+  await saveConfig(config);
+  invalidateSessions();
+  lastSessionSignature = "";
+  const sessions = await publicSessions();
+  await Promise.allSettled(
+    Object.keys(config.clients).map((clientId) => send(config, clientId, { type: "sessions:snapshot", sessions })),
+  );
+  return { ok: true, providers: await sessionDiagnostics() };
 }
 
 async function approvePair(config, body) {
@@ -587,6 +634,7 @@ async function syncExternalChanges(config) {
 
 async function main() {
   const config = await loadConfig();
+  configureSessionRoots({ codexHome: config.codexHome, claudeHome: config.claudeHome });
   for (const [clientId, client] of Object.entries(config.clients)) {
     if (client.watch?.key && client.watch?.provider && client.watch?.sessionId) {
       subscriptions.set(clientId, { ...client.watch, refreshedAt: Date.now() });
@@ -622,6 +670,7 @@ async function main() {
     approve: async (body) => approvePair(config, body),
     reject: async (body) => rejectPair(config, body),
     revoke: async (body) => revokeClient(config, body),
+    updateSettings: async (body) => updateProviderHomes(config, body),
   });
   console.log(`电脑控制中心：${CONTROL_URL}`);
 

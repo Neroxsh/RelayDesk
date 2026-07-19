@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { decryptJson, deriveSessionKey, encryptJson, generateDeviceKeys, sha256 } from "../agent/crypto.mjs";
 import { codexThreadUrl } from "../agent/providers.mjs";
-import { parseCodexTranscript, readSessionTranscript } from "../agent/sessions.mjs";
+import {
+  configureSessionRoots,
+  normalizeProviderHome,
+  parseCodexTranscript,
+  readSessionTranscript,
+  sessionDiagnostics,
+} from "../agent/sessions.mjs";
 
 test("desktop and phone derive the same end-to-end key", async () => {
   const desktop = await generateDeviceKeys();
@@ -21,6 +27,27 @@ test("historical Codex sessions use the desktop app deeplink", () => {
   const id = "019f499e-1483-7dc1-8cca-1bbc9b5958bd";
   assert.equal(codexThreadUrl(id), `codex://threads/${id}`);
   assert.throws(() => codexThreadUrl("../../wrong"), /会话 ID 无效/);
+});
+
+test("Codex session discovery accepts a custom home or sessions directory", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "relaydesk-codex-home-"));
+  const sessions = path.join(directory, "sessions", "2026", "07", "19");
+  const file = path.join(sessions, "rollout-019f499e-1483-7dc1-8cca-1bbc9b5958bd.jsonl");
+  try {
+    await mkdir(sessions, { recursive: true });
+    await writeFile(file, `${JSON.stringify({
+      type: "session_meta",
+      payload: { id: "019f499e-1483-7dc1-8cca-1bbc9b5958bd", cwd: directory },
+    })}\n`, "utf8");
+    assert.equal(normalizeProviderHome("codex", path.join(directory, "sessions")), directory);
+    configureSessionRoots({ codexHome: directory });
+    const diagnostics = await sessionDiagnostics();
+    assert.equal(diagnostics.codex.count >= 1, true);
+    assert.equal(diagnostics.codex.activeHome, directory);
+  } finally {
+    configureSessionRoots();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Codex transcript exposes visible messages and safe live progress", () => {
@@ -106,6 +133,8 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(conversation, /reply-pulse/);
   assert.match(page, /session:watch/);
   assert.match(page, /session:activate/);
+  assert.match(page, /sessions:ack/);
+  assert.match(page, /30_000/);
   assert.match(page, /mergeSessionMessages/);
   assert.match(page, /attempt < 4/);
   assert.doesNotMatch(page, /consecutivePollFailures/);
@@ -139,6 +168,8 @@ test("the agent persists and renews a selected-session subscription", async () =
   assert.match(agent, /claimMutatingRequest/);
   assert.match(agent, /sendToCodexSession/);
   assert.match(agent, /activeCodexSessionId/);
+  assert.match(agent, /sessionDiagnostics/);
+  assert.match(agent, /sessions:ack/);
   assert.match(agent, /中继服务返回\\s\*5\\d\\d/);
 });
 

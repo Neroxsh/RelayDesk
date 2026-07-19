@@ -2,13 +2,6 @@ import { open, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
-const CODEX_ROOT = process.env.CODEX_HOME
-  ? path.join(process.env.CODEX_HOME, "sessions")
-  : path.join(os.homedir(), ".codex", "sessions");
-const CLAUDE_ROOT = path.join(os.homedir(), ".claude", "projects");
-const CODEX_INDEX = process.env.CODEX_HOME
-  ? path.join(process.env.CODEX_HOME, "session_index.jsonl")
-  : path.join(os.homedir(), ".codex", "session_index.jsonl");
 const INITIAL_HISTORY_BYTES = 4 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_INCREMENT_BYTES = 4 * 1024 * 1024;
@@ -16,6 +9,70 @@ const RECENT_ROW_LIMIT = 1_500;
 
 let cache = { at: 0, sessions: [] };
 const transcriptCache = new Map();
+let configuredHomes = { codex: "", claude: "" };
+
+function uniquePaths(values) {
+  const seen = new Set();
+  return values.filter((value) => {
+    if (!value) return false;
+    const key = process.platform === "win32" ? value.toLowerCase() : value;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function cleanPath(value) {
+  const text = String(value ?? "").trim().replace(/^(["'])(.*)\1$/, "$2");
+  return text ? path.resolve(text) : "";
+}
+
+export function normalizeProviderHome(provider, value) {
+  let resolved = cleanPath(value);
+  if (!resolved) return "";
+  const leaf = path.basename(resolved).toLowerCase();
+  if (provider === "codex") {
+    if (leaf === "sessions") resolved = path.dirname(resolved);
+    if (leaf === "session_index.jsonl") resolved = path.dirname(resolved);
+  } else if (provider === "claude" && leaf === "projects") {
+    resolved = path.dirname(resolved);
+  }
+  return resolved;
+}
+
+export function configureSessionRoots({ codexHome = "", claudeHome = "" } = {}) {
+  configuredHomes = {
+    codex: normalizeProviderHome("codex", codexHome),
+    claude: normalizeProviderHome("claude", claudeHome),
+  };
+  invalidateSessions();
+}
+
+function providerHomes(provider) {
+  const home = os.homedir();
+  if (provider === "codex") {
+    return uniquePaths([
+      configuredHomes.codex,
+      normalizeProviderHome("codex", process.env.CODEX_HOME),
+      path.join(home, ".codex"),
+      process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".codex") : "",
+      process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "codex") : "",
+      process.env.APPDATA ? path.join(process.env.APPDATA, "Codex") : "",
+    ].map((value) => normalizeProviderHome("codex", value)));
+  }
+  return uniquePaths([
+    configuredHomes.claude,
+    normalizeProviderHome("claude", process.env.CLAUDE_CONFIG_DIR),
+    path.join(home, ".claude"),
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".claude") : "",
+    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "claude") : "",
+  ].map((value) => normalizeProviderHome("claude", value)));
+}
+
+function providerRoots(provider) {
+  const child = provider === "codex" ? "sessions" : "projects";
+  return providerHomes(provider).map((home) => ({ home, root: path.join(home, child) }));
+}
 
 async function walk(directory) {
   const files = [];
@@ -129,14 +186,16 @@ function isMetadataOnly(value) {
   return !text || /^(?:<[^>]+>|# AGENTS\.md instructions|# Session title|<INSTRUCTIONS>)/i.test(text);
 }
 
-async function codexThreadNames() {
+async function codexThreadNames(homes = providerHomes("codex")) {
   const names = new Map();
-  try {
-    for (const row of parseLines(await readFile(CODEX_INDEX, "utf8"))) {
-      if (row?.id && row?.thread_name) names.set(row.id, trimTitle(row.thread_name));
+  for (const home of homes) {
+    try {
+      for (const row of parseLines(await readFile(path.join(home, "session_index.jsonl"), "utf8"))) {
+        if (row?.id && row?.thread_name) names.set(row.id, trimTitle(row.thread_name));
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "EACCES") throw error;
     }
-  } catch (error) {
-    if (error?.code !== "ENOENT" && error?.code !== "EACCES") throw error;
   }
   return names;
 }
@@ -194,8 +253,17 @@ function claudeMeta(rows, filePath) {
 
 export async function listSessions(force = false) {
   if (!force && Date.now() - cache.at < 2_000) return cache.sessions;
-  const [codexFiles, claudeFiles, threadNames] = await Promise.all([walk(CODEX_ROOT), walk(CLAUDE_ROOT), codexThreadNames()]);
+  const codexLocations = providerRoots("codex");
+  const claudeLocations = providerRoots("claude");
+  const [codexGroups, claudeGroups, threadNames] = await Promise.all([
+    Promise.all(codexLocations.map(({ root }) => walk(root))),
+    Promise.all(claudeLocations.map(({ root }) => walk(root))),
+    codexThreadNames(codexLocations.map(({ home }) => home)),
+  ]);
+  const codexFiles = uniquePaths(codexGroups.flat());
+  const claudeFiles = uniquePaths(claudeGroups.flat());
   const sessions = [];
+  const sessionKeys = new Set();
   for (const [provider, files] of [
     ["codex", codexFiles],
     ["claude", claudeFiles],
@@ -205,9 +273,12 @@ export async function listSessions(force = false) {
         const info = await stat(filePath);
         const headRows = parseLines(await readHead(filePath));
         const session = provider === "codex" ? codexMeta(headRows, filePath, threadNames) : claudeMeta(headRows, filePath);
+        const sessionKey = `${provider}:${session.id}`;
+        if (sessionKeys.has(sessionKey)) continue;
+        sessionKeys.add(sessionKey);
         sessions.push({
           ...session,
-          key: `${provider}:${session.id}`,
+          key: sessionKey,
           updatedAt: info.mtimeMs,
           recent: Date.now() - info.mtimeMs < 2 * 60_000,
         });
@@ -219,6 +290,29 @@ export async function listSessions(force = false) {
   sessions.sort((a, b) => b.updatedAt - a.updatedAt);
   cache = { at: Date.now(), sessions };
   return sessions;
+}
+
+export async function sessionDiagnostics() {
+  const parsedSessions = await listSessions();
+  const inspect = async (provider) => {
+    const locations = providerRoots(provider);
+    const groups = await Promise.all(locations.map(({ root }) => walk(root)));
+    const counts = locations.map(({ home, root }, index) => ({ home, root, count: groups[index].length }));
+    const active = counts.find((item) => item.count > 0) ?? counts[0] ?? { home: "", root: "", count: 0 };
+    const fileCount = uniquePaths(groups.flat()).length;
+    const count = parsedSessions.filter((session) => session.provider === provider).length;
+    return {
+      configuredHome: configuredHomes[provider],
+      activeHome: active.home,
+      activeRoot: active.root,
+      count,
+      fileCount,
+      skippedCount: Math.max(0, fileCount - count),
+      searched: counts.map(({ home, root, count }) => ({ home, root, count })),
+    };
+  };
+  const [codex, claude] = await Promise.all([inspect("codex"), inspect("claude")]);
+  return { codex, claude };
 }
 
 function pushMessage(messages, role, content, timestamp, meta) {
