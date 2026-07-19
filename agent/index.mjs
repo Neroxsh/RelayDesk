@@ -560,7 +560,10 @@ async function main() {
     if (heartbeatInFlight) return;
     heartbeatInFlight = true;
     try {
-      await request(config, "/api/agent/heartbeat", { method: "POST" });
+      await request(config, "/api/agent/heartbeat", {
+        method: "POST",
+        signal: AbortSignal.timeout(20_000),
+      });
     } catch (error) {
       console.error(`心跳更新失败：${error instanceof Error ? error.message : error}`);
     } finally {
@@ -568,7 +571,7 @@ async function main() {
     }
   };
   void heartbeat();
-  setInterval(() => void heartbeat(), 5_000);
+  setInterval(() => void heartbeat(), 10_000);
 
   let delay = 700;
   while (true) {

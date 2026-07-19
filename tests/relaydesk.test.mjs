@@ -97,7 +97,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(page, /session:watch/);
   assert.match(page, /mergeSessionMessages/);
   assert.match(page, /attempt < 4/);
-  assert.match(page, /consecutivePollFailures/);
+  assert.doesNotMatch(page, /consecutivePollFailures/);
   assert.match(meta, /export function mergeSessionMessages/);
   assert.match(page, /visibilitychange/);
   assert.match(page, /updateViaCache: "none"/);
@@ -160,6 +160,7 @@ test("the mainland entry runs the RelayDesk API on strongly consistent storage",
   ]);
   assert.match(proxy, /@edgeone\/pages-blob/);
   assert.match(proxy, /consistency: "strong"/);
+  assert.match(proxy, /DEVICE_ONLINE_WINDOW = 60_000/);
   assert.match(proxy, /path === "\/api\/client\/send"/);
   assert.match(proxy, /path === "\/api\/agent\/import"/);
   assert.doesNotMatch(proxy, /chatgpt\.site/);

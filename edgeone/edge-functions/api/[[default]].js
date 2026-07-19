@@ -3,6 +3,7 @@ import { getStore } from "@edgeone/pages-blob";
 const db = getStore({ name: "relaydesk", consistency: "strong" });
 let lastMessageId = 0;
 const pairAttempts = new Map();
+const DEVICE_ONLINE_WINDOW = 60_000;
 
 const key = {
   device: (id) => `devices/${id}.json`,
@@ -337,7 +338,7 @@ async function pollClient(request) {
     device: device ? {
       name: device.name,
       platform: device.platform,
-      online: timestamp - device.lastSeenAt < 15_000,
+      online: timestamp - device.lastSeenAt < DEVICE_ONLINE_WINDOW,
       lastSeenAt: device.lastSeenAt,
     } : null,
   });
