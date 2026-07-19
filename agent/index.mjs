@@ -1,7 +1,4 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -12,52 +9,9 @@ import { CONTROL_URL, openControlPanel, startControlServer } from "./control-ser
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const HTTP_BRIDGE = path.join(path.dirname(fileURLToPath(import.meta.url)), "http-bridge.ps1");
 const command = process.argv[2] ?? "start";
 const DEFAULT_RELAY = "https://relay.xingshihao.site";
 const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-let bridgeProcess;
-let bridgeSequence = 0;
-const bridgePending = new Map();
-
-function powershellRequest(url, options) {
-  if (!bridgeProcess || bridgeProcess.exitCode !== null) {
-    bridgeProcess = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", HTTP_BRIDGE],
-      { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
-    );
-    const lines = createInterface({ input: bridgeProcess.stdout });
-    lines.on("line", (line) => {
-      try {
-        const result = JSON.parse(line);
-        const pending = bridgePending.get(result.id);
-        if (!pending) return;
-        bridgePending.delete(result.id);
-        pending.resolve(result);
-      } catch {
-        // Ignore non-protocol output from Windows PowerShell.
-      }
-    });
-    bridgeProcess.once("exit", () => {
-      for (const pending of bridgePending.values()) pending.reject(new Error("Windows network bridge stopped"));
-      bridgePending.clear();
-      bridgeProcess = null;
-    });
-  }
-  const id = ++bridgeSequence;
-  return new Promise((resolve, reject) => {
-    bridgePending.set(id, { resolve, reject });
-    bridgeProcess.stdin.write(`${JSON.stringify({
-      id,
-      url,
-      method: options.method ?? "GET",
-      headers: options.headers ?? {},
-      body: options.body ?? null,
-    })}\n`);
-  });
-}
 
 function argument(name) {
   const inline = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -127,17 +81,14 @@ async function request(config, pathname, options = {}) {
     "x-relaydesk-device-id": config.deviceId,
     ...(options.headers ?? {}),
   };
-  let status;
-  let responseBody;
-  if (process.platform === "win32") {
-    const result = await powershellRequest(`${config.relayUrl}${pathname}`, { ...options, headers });
-    status = result.status;
-    responseBody = result.body;
-  } else {
-    const response = await fetch(`${config.relayUrl}${pathname}`, { ...options, headers });
-    status = response.status;
-    responseBody = await response.text();
-  }
+  const { auth: _auth, ...fetchOptions } = options;
+  const response = await fetch(`${config.relayUrl}${pathname}`, {
+    ...fetchOptions,
+    headers,
+    signal: options.signal ?? AbortSignal.timeout(10_000),
+  });
+  const status = response.status;
+  const responseBody = await response.text();
   let data = {};
   try {
     data = responseBody ? JSON.parse(responseBody) : {};
@@ -503,7 +454,6 @@ async function main() {
   if (command === "pair" || command === "control") {
     console.log(`\n永久连接密钥：${config.pairKey}\n电脑控制中心：${CONTROL_URL}\n`);
     openControlPanel();
-    bridgeProcess?.stdin.end();
     return;
   }
   if (command !== "start") {
@@ -522,14 +472,24 @@ async function main() {
   });
   console.log(`电脑控制中心：${CONTROL_URL}`);
 
+  let heartbeatInFlight = false;
+  const heartbeat = async () => {
+    if (heartbeatInFlight) return;
+    heartbeatInFlight = true;
+    try {
+      await request(config, "/api/agent/heartbeat", { method: "POST" });
+    } catch (error) {
+      console.error(`心跳更新失败：${error instanceof Error ? error.message : error}`);
+    } finally {
+      heartbeatInFlight = false;
+    }
+  };
+  void heartbeat();
+  setInterval(() => void heartbeat(), 5_000);
+
   let delay = 700;
-  let lastHeartbeatAt = 0;
   while (true) {
     try {
-      if (Date.now() - lastHeartbeatAt >= 5_000) {
-        await request(config, "/api/agent/heartbeat", { method: "POST" });
-        lastHeartbeatAt = Date.now();
-      }
       await poll(config);
       await syncExternalChanges(config);
       delay = 700;
