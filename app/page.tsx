@@ -400,11 +400,15 @@ export default function Home() {
   }
 
   function selectSession(session: SessionSummary) {
-    if (session.openInCodex && currentWindow) {
-      setSelectedKey(currentWindow.key);
-      return;
-    }
     setSelectedKey(session.key);
+    if (session.provider === "codex" && !session.currentWindow) {
+      void remoteSend({
+        type: "session:activate",
+        provider: session.provider,
+        sessionId: session.id,
+        requestId: requestId(),
+      }).catch((error) => setToast(error instanceof Error ? error.message : "无法在电脑上打开这个会话"));
+    }
   }
 
   function stopSession() {

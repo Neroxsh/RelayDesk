@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { decryptJson, deriveSessionKey, encryptJson, generateDeviceKeys, randomToken, sha256 } from "./crypto.mjs";
 import { getSession, invalidateSessions, listSessions } from "./sessions.mjs";
-import { sendPrompt, sendToCurrentCodex } from "./providers.mjs";
+import { openCodexSession, sendPrompt, sendToCodexSession, sendToCurrentCodex } from "./providers.mjs";
 import { CONTROL_URL, openControlPanel, startControlServer } from "./control-server.mjs";
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
@@ -140,6 +140,7 @@ const stableSnapshots = new Map();
 const handledRequests = new Map();
 let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
+let activeCodexSessionId = null;
 const SUBSCRIPTION_TTL = 45_000;
 
 function messageSignature(message) {
@@ -201,7 +202,7 @@ async function sendBestEffort(config, clientId, payload) {
 }
 
 function claimMutatingRequest(clientId, payload) {
-  if (!["session:send", "session:stop"].includes(payload?.type) || !payload?.requestId) return true;
+  if (!["session:activate", "session:send", "session:stop"].includes(payload?.type) || !payload?.requestId) return true;
   const current = Date.now();
   if (handledRequests.size > 200) {
     for (const [key, expiresAt] of handledRequests) {
@@ -217,11 +218,13 @@ function claimMutatingRequest(clientId, payload) {
 async function publicSessions() {
   const source = await listSessions();
   const latestCodex = source.find((session) => session.provider === "codex");
+  const currentCodex = source.find((session) => session.provider === "codex" && session.id === activeCodexSessionId)
+    ?? latestCodex;
   const sessions = source.map((session) => {
     const result = {
       ...session,
       active: activeRuns.has(session.key),
-      openInCodex: session.provider === "codex" && session.id === latestCodex?.id,
+      openInCodex: session.provider === "codex" && session.id === currentCodex?.id,
     };
     delete result.filePath;
     return result;
@@ -231,9 +234,9 @@ async function publicSessions() {
     key: "codex:__current__",
     provider: "codex",
     title: "当前 Codex 窗口",
-    cwd: latestCodex?.cwd ?? "",
+    cwd: currentCodex?.cwd ?? "",
     projectName: "当前窗口",
-    updatedAt: latestCodex?.updatedAt ?? Date.now(),
+    updatedAt: currentCodex?.updatedAt ?? Date.now(),
     recent: true,
     active: activeRuns.has("codex:__current__"),
     currentWindow: true,
@@ -244,7 +247,9 @@ async function publicSessions() {
 async function currentCodexDetail() {
   const source = await listSessions(true);
   const latest = source.find((session) => session.provider === "codex");
-  const detail = latest ? await getSession("codex", latest.id) : { messages: [] };
+  const current = source.find((session) => session.provider === "codex" && session.id === activeCodexSessionId)
+    ?? latest;
+  const detail = current ? await getSession("codex", current.id) : { messages: [] };
   return {
     ...detail,
     id: "__current__",
@@ -252,7 +257,7 @@ async function currentCodexDetail() {
     provider: "codex",
     title: "当前 Codex 窗口",
     currentWindow: true,
-    sourceSessionId: latest?.id ?? null,
+    sourceSessionId: current?.id ?? null,
   };
 }
 
@@ -292,6 +297,24 @@ async function handleCommand(config, clientId, payload) {
       const session = await sessionDetail(payload.provider, payload.sessionId);
       await watchSession(config, clientId, session);
       await send(config, clientId, { type: "session:snapshot", requestId, session });
+      return;
+    }
+    if (payload?.type === "session:activate") {
+      if (payload.provider !== "codex") throw new Error("这个会话不支持在 Codex 桌面端打开");
+      const session = await getSession("codex", payload.sessionId);
+      const navigation = openCodexSession(session.id);
+      await navigation.completed;
+      activeCodexSessionId = session.id;
+      await sendBestEffort(config, clientId, {
+        type: "session:activated",
+        requestId,
+        sessionKey: session.key,
+      });
+      await sendBestEffort(config, clientId, {
+        type: "sessions:snapshot",
+        requestId,
+        sessions: await publicSessions(),
+      });
       return;
     }
     if (payload?.type === "session:stop") {
@@ -335,6 +358,53 @@ async function handleCommand(config, clientId, payload) {
       const key = `${session.provider}:${session.id}`;
       await watchSession(config, clientId, session);
       if (activeRuns.has(key)) throw new Error("这个会话仍在执行，请等待或先停止");
+      if (session.provider === "codex") {
+        activeCodexSessionId = session.id;
+        const run = sendToCodexSession(session.id, prompt);
+        activeRuns.set(key, run);
+        void sendBestEffort(config, clientId, {
+          type: "run:status",
+          requestId,
+          sessionKey: key,
+          status: "running",
+          mode: "window",
+        });
+        try {
+          await run.completed;
+          invalidateSessions();
+          await sendBestEffort(config, clientId, {
+            type: "run:status",
+            requestId,
+            sessionKey: key,
+            status: "submitted",
+          });
+        } catch (error) {
+          await sendBestEffort(config, clientId, {
+            type: "run:status",
+            requestId,
+            sessionKey: key,
+            status: "failed",
+            error: userFacingError(error),
+          });
+        } finally {
+          activeRuns.delete(key);
+          invalidateSessions();
+          const updated = await getSession(session.provider, session.id).catch(() => null);
+          if (updated) {
+            await sendBestEffort(config, clientId, {
+              type: "session:snapshot",
+              requestId,
+              session: stableSessionSnapshot(updated),
+            });
+          }
+          await sendBestEffort(config, clientId, {
+            type: "sessions:snapshot",
+            requestId,
+            sessions: await publicSessions(),
+          });
+        }
+        return;
+      }
       const run = sendPrompt(session, prompt, mode, (event) => {
         void send(config, clientId, {
           type: "run:event",

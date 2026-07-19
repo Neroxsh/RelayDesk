@@ -4,6 +4,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CODEX_WINDOW_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-window.ps1");
+const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CODEX_DEEPLINK_SETTLE_MS = 1_400;
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export function codexThreadUrl(sessionId) {
+  const id = String(sessionId ?? "").trim();
+  if (!CODEX_THREAD_ID.test(id)) throw new Error("Codex 会话 ID 无效");
+  return `codex://threads/${id}`;
+}
 
 function resolveOnWindows(name) {
   const script = `$all=Get-Command ${name} -All -ErrorAction Stop; ` +
@@ -177,6 +189,61 @@ export function sendToCurrentCodex(prompt) {
     completed,
     stop() {
       if (child.exitCode === null) child.kill();
+    },
+  };
+}
+
+export function openCodexSession(sessionId) {
+  if (process.platform !== "win32") throw new Error("打开 Codex 桌面会话目前只支持 Windows");
+  const url = codexThreadUrl(sessionId);
+  const child = spawn(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `Start-Process -FilePath '${url}'`,
+    ],
+    { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] },
+  );
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  const completed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve({ ok: true, url });
+      else reject(new Error(stderr.trim() || "无法打开 Codex 桌面会话"));
+    });
+  });
+  void completed.catch(() => undefined);
+  return {
+    pid: child.pid,
+    completed,
+    stop() {
+      if (child.exitCode === null) child.kill();
+    },
+  };
+}
+
+export function sendToCodexSession(sessionId, prompt) {
+  const navigation = openCodexSession(sessionId);
+  let injection = null;
+  let stopped = false;
+  const completed = (async () => {
+    await navigation.completed;
+    await wait(CODEX_DEEPLINK_SETTLE_MS);
+    if (stopped) throw new Error("发送已停止");
+    injection = sendToCurrentCodex(prompt);
+    return injection.completed;
+  })();
+  void completed.catch(() => undefined);
+  return {
+    pid: navigation.pid,
+    completed,
+    stop() {
+      stopped = true;
+      navigation.stop();
+      injection?.stop();
     },
   };
 }

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { decryptJson, deriveSessionKey, encryptJson, generateDeviceKeys, sha256 } from "../agent/crypto.mjs";
+import { codexThreadUrl } from "../agent/providers.mjs";
 import { parseCodexTranscript, readSessionTranscript } from "../agent/sessions.mjs";
 
 test("desktop and phone derive the same end-to-end key", async () => {
@@ -14,6 +15,12 @@ test("desktop and phone derive the same end-to-end key", async () => {
   const phoneKey = await deriveSessionKey(phone.privateKey, desktop.publicKey, salt);
   const envelope = await encryptJson(phoneKey, { type: "sessions:list", requestId: "test" });
   assert.deepEqual(await decryptJson(desktopKey, envelope), { type: "sessions:list", requestId: "test" });
+});
+
+test("historical Codex sessions use the desktop app deeplink", () => {
+  const id = "019f499e-1483-7dc1-8cca-1bbc9b5958bd";
+  assert.equal(codexThreadUrl(id), `codex://threads/${id}`);
+  assert.throws(() => codexThreadUrl("../../wrong"), /会话 ID 无效/);
 });
 
 test("Codex transcript exposes visible messages and safe live progress", () => {
@@ -98,6 +105,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(conversation, /自动执行/);
   assert.match(conversation, /reply-pulse/);
   assert.match(page, /session:watch/);
+  assert.match(page, /session:activate/);
   assert.match(page, /mergeSessionMessages/);
   assert.match(page, /attempt < 4/);
   assert.doesNotMatch(page, /consecutivePollFailures/);
@@ -129,6 +137,8 @@ test("the agent persists and renews a selected-session subscription", async () =
   assert.match(agent, /stableSessionSnapshot/);
   assert.match(agent, /sendBestEffort/);
   assert.match(agent, /claimMutatingRequest/);
+  assert.match(agent, /sendToCodexSession/);
+  assert.match(agent, /activeCodexSessionId/);
   assert.match(agent, /中继服务返回\\s\*5\\d\\d/);
 });
 
