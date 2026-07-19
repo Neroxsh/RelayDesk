@@ -226,6 +226,7 @@ export default function Home() {
     if (!pairing) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
+    let consecutivePollFailures = 0;
     const poll = async () => {
       try {
         const response = await fetch(`/api/client/poll?after=${cursorRef.current}`, {
@@ -246,6 +247,7 @@ export default function Home() {
           return;
         }
         if (!response.ok) throw new Error(data.error ?? "同步失败");
+        consecutivePollFailures = 0;
         if (!stopped && data.device) setDevice(data.device);
         if (!keyRef.current) keyRef.current = await importSessionKey(pairing.key);
         for (const message of data.messages ?? []) {
@@ -256,9 +258,12 @@ export default function Home() {
         }
         localStorage.setItem(cursorKey(pairing.clientId), String(cursorRef.current));
         if (!stopped) timer = setTimeout(poll, document.visibilityState === "visible" ? 700 : 2_500);
-      } catch (error) {
+      } catch {
         if (!stopped) {
-          setToast(error instanceof Error ? error.message : "连接暂时中断");
+          consecutivePollFailures += 1;
+          if (consecutivePollFailures >= 4) {
+            setDevice((value) => value ? { ...value, online: false } : value);
+          }
           timer = setTimeout(poll, 2_500);
         }
       }

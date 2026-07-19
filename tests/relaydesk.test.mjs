@@ -97,6 +97,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(page, /session:watch/);
   assert.match(page, /mergeSessionMessages/);
   assert.match(page, /attempt < 4/);
+  assert.match(page, /consecutivePollFailures/);
   assert.match(meta, /export function mergeSessionMessages/);
   assert.match(page, /visibilitychange/);
   assert.match(page, /updateViaCache: "none"/);
@@ -104,6 +105,13 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(css, /font-size: 16px/);
   assert.equal(JSON.parse(manifest).display, "standalone");
   assert.match(migration, /pending_pairs/);
+});
+
+test("the public bridge retries transient EdgeOne read failures", async () => {
+  const bridge = await readFile(new URL("../cloudflare-bridge/worker.js", import.meta.url), "utf8");
+  assert.match(bridge, /TRANSIENT_ORIGIN_STATUS/);
+  assert.match(bridge, /request\.method === "GET"/);
+  assert.match(bridge, /attempts = safeToRetry \? 3 : 1/);
 });
 
 test("the agent persists and renews a selected-session subscription", async () => {
