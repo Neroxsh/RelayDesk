@@ -59,8 +59,31 @@ export default function Home() {
       }
       setHydrated(true);
     }, 0);
-    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
-    return () => clearTimeout(timer);
+    let refreshing = false;
+    const refreshForUpdate = () => {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    };
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("controllerchange", refreshForUpdate);
+      void navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).then((registration) => {
+        registration.waiting?.postMessage({ type: "SKIP_WAITING" });
+        void registration.update();
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          worker?.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) {
+              worker.postMessage({ type: "SKIP_WAITING" });
+            }
+          });
+        });
+      }).catch(() => undefined);
+    }
+    return () => {
+      clearTimeout(timer);
+      navigator.serviceWorker?.removeEventListener("controllerchange", refreshForUpdate);
+    };
   }, []);
 
   useEffect(() => {
@@ -293,6 +316,7 @@ export default function Home() {
     const latestAssistant = [...messages].reverse().find((message) => message.role === "assistant");
     waitingForReplyRef.current.set(selectedSummary.key, latestAssistant ? messageSignature(latestAssistant) : null);
     setSending(true);
+    setRunning((value) => ({ ...value, [selectedSummary.key]: "sending" }));
     setDraft("");
     setLiveMessages((value) => ({
       ...value,
@@ -318,6 +342,11 @@ export default function Home() {
         optimisticRef.current.delete(remoteRequestId);
       }
       waitingForReplyRef.current.delete(selectedSummary.key);
+      setRunning((value) => {
+        const next = { ...value };
+        delete next[selectedSummary.key];
+        return next;
+      });
       setToast(error instanceof Error ? error.message : "发送失败");
     } finally {
       setSending(false);

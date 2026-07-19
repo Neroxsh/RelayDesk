@@ -88,11 +88,15 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(meta, /Claude Code/);
   assert.match(conversation, /返回会话列表/);
   assert.match(conversation, /回复会持续显示在这里/);
+  assert.match(conversation, /发送后会排到当前任务后/);
+  assert.match(conversation, /!session\.currentWindow && transcriptWorking/);
+  assert.doesNotMatch(conversation, /disabled=\{!draft\.trim\(\) \|\| sending \|\| isWorking\}/);
   assert.match(conversation, /任务进行中/);
   assert.match(conversation, /需确认/);
   assert.match(conversation, /自动执行/);
   assert.match(page, /session:watch/);
   assert.match(page, /visibilitychange/);
+  assert.match(page, /updateViaCache: "none"/);
   assert.match(css, /\.app-shell\.has-selection \.conversation-panel \{ position: fixed; inset: 0/);
   assert.match(css, /font-size: 16px/);
   assert.equal(JSON.parse(manifest).display, "standalone");

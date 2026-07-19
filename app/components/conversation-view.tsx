@@ -52,8 +52,12 @@ export function ConversationView({
   onKeyDown,
   onStop,
 }: ConversationViewProps) {
-  const isWorking = Boolean(runningStatus) || detail?.state === "working";
+  const transcriptWorking = detail?.state === "working";
+  const isWorking = Boolean(runningStatus) || transcriptWorking;
   const waiting = runningStatus === "waiting";
+  // The current Codex window accepts a queued instruction while its existing task is
+  // running. Historical CLI sessions still need to finish before another run starts.
+  const submitLocked = sending || Boolean(runningStatus) || (!session.currentWindow && transcriptWorking);
   const activity = detail?.activity ?? [];
 
   return (
@@ -110,11 +114,19 @@ export function ConversationView({
               <button type="button" className={mode === "full" ? "active warning" : ""} onClick={() => onModeChange("full")}><Zap size={14} />自动执行</button>
             </div>
           )}
-          <span className="sync-copy">{isWorking ? "回复会持续显示在这里" : "与电脑保持同步"}</span>
+          <span className="sync-copy">{
+            session.currentWindow && runningStatus
+              ? "正在送达电脑"
+              : session.currentWindow && transcriptWorking
+                ? "发送后会排到当前任务后"
+                : isWorking
+                  ? "回复会持续显示在这里"
+                  : "与电脑保持同步"
+          }</span>
         </div>
         <div className="composer-input">
           <textarea rows={1} value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={onKeyDown} placeholder={waiting ? "正在等待回复" : `给 ${providerName(session.provider)} 发消息`} />
-          <button type="submit" disabled={!draft.trim() || sending || isWorking} aria-label="发送"><ArrowUp size={20} /></button>
+          <button type="submit" disabled={!draft.trim() || submitLocked} aria-label="发送"><ArrowUp size={20} /></button>
         </div>
       </form>
     </section>
