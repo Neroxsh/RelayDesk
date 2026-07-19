@@ -99,7 +99,11 @@ export default function Home() {
     const envelope = await encryptJson(keyRef.current, payload);
     const response = await fetch("/api/client/send", {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${current.clientToken}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${current.clientToken}`,
+        "x-relaydesk-client-id": current.clientId,
+      },
       body: JSON.stringify({ envelope }),
     });
     const data = await response.json().catch(() => ({})) as { error?: string };
@@ -208,10 +212,15 @@ export default function Home() {
     const poll = async () => {
       try {
         const response = await fetch(`/api/client/poll?after=${cursorRef.current}`, {
-          headers: { authorization: `Bearer ${pairing.clientToken}` },
+          headers: {
+            authorization: `Bearer ${pairing.clientToken}`,
+            "x-relaydesk-client-id": pairing.clientId,
+          },
           cache: "no-store",
         });
-        const data = await response.json() as PollResponse;
+        const data = await response.json().catch(() => {
+          throw new Error(response.ok ? "服务返回异常，正在重连" : `连接失败（${response.status}）`);
+        }) as PollResponse;
         if (response.status === 401) {
           localStorage.removeItem(STORAGE_KEY);
           localStorage.removeItem(LEGACY_STORAGE_KEY);

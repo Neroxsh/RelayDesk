@@ -79,6 +79,11 @@ function pairRequestDeviceId(requestId) {
   return validId(deviceId) && requestId[start + length] === "_" ? deviceId : null;
 }
 
+function pairedClientIdFromToken(token) {
+  const match = /^rdc:([A-Za-z0-9_-]{8,180}):[A-Za-z0-9_-]{16,}$/.exec(token || "");
+  return match && pairRequestDeviceId(match[1]) ? match[1] : null;
+}
+
 function validHash(value) {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
@@ -98,6 +103,11 @@ async function authenticateAgent(request) {
   const token = bearer(request);
   if (!token) return null;
   const tokenHash = await sha256(token);
+  const claimedDeviceId = request.headers.get("x-relaydesk-device-id") || "";
+  if (validId(claimedDeviceId)) {
+    const device = await getJson(key.device(claimedDeviceId));
+    return device?.agentTokenHash === tokenHash ? device : null;
+  }
   const index = await getJson(key.agentToken(tokenHash));
   if (!index?.deviceId) return null;
   const device = await getJson(key.device(index.deviceId));
@@ -108,6 +118,14 @@ async function authenticateClient(request) {
   const token = bearer(request);
   if (!token) return null;
   const tokenHash = await sha256(token);
+  const claimedClientId = request.headers.get("x-relaydesk-client-id") || pairedClientIdFromToken(token) || "";
+  if (validId(claimedClientId)) {
+    const pendingDeviceId = pairRequestDeviceId(claimedClientId);
+    const client = pendingDeviceId
+      ? await getJson(key.pending(pendingDeviceId, claimedClientId))
+      : await getJson(key.client(claimedClientId));
+    return client && !client.revokedAt && client.tokenHash === tokenHash ? client : null;
+  }
   const index = await getJson(key.clientToken(tokenHash));
   if (!index?.clientId) return null;
   const client = await getJson(key.client(index.clientId));
@@ -180,8 +198,14 @@ async function registerDevice(request) {
   const tokenHash = await sha256(body.agentToken);
   const existing = await getJson(key.device(body.deviceId));
   if (existing && existing.agentTokenHash !== tokenHash) return jsonError("设备认证失败", 401);
-  const pairOwner = await getJson(key.pairKey(body.pairKeyHash));
-  if (pairOwner?.deviceId && pairOwner.deviceId !== body.deviceId) return jsonError("连接密钥已被使用", 409);
+  if (!existing) {
+    try {
+      await db.setJSON(key.pairKey(body.pairKeyHash), { deviceId: body.deviceId }, { onlyIfNew: true });
+    } catch (error) {
+      if (error?.code === "PRECONDITION_FAILED") return jsonError("连接密钥已被使用", 409);
+      throw error;
+    }
+  }
   const timestamp = now();
   const device = {
     ...(existing || {}),
@@ -194,11 +218,7 @@ async function registerDevice(request) {
     lastSeenAt: timestamp,
     createdAt: existing?.createdAt || timestamp,
   };
-  await Promise.all([
-    putJson(key.device(device.id), device),
-    putJson(key.agentToken(tokenHash), { deviceId: device.id }),
-    putJson(key.pairKey(body.pairKeyHash), { deviceId: device.id }),
-  ]);
+  await putJson(key.device(device.id), device);
   return json({ ok: true, deviceId: device.id });
 }
 
@@ -258,25 +278,22 @@ async function approvePair(request) {
   if (!pending || pending.deviceId !== agent.id) return jsonError("连接请求不存在", 404);
   if (pending.status === "approved" && pending.clientId) return json({ ok: true, clientId: pending.clientId });
   if (pending.status !== "pending" || pending.expiresAt < now()) return jsonError("连接请求已失效", 409);
-  const clientId = `client_${randomToken(12)}`;
-  const clientToken = randomToken(32);
+  const clientId = pending.id;
+  const clientToken = `rdc:${pending.id}:${randomToken(24)}`;
   const tokenHash = await sha256(clientToken);
   const timestamp = now();
-  const client = {
+  await putJson(key.pending(agent.id, body.requestId), {
+    ...pending,
     id: clientId,
-    deviceId: agent.id,
     tokenHash,
-    publicKey: pending.publicKey,
     createdAt: timestamp,
     lastSeenAt: timestamp,
     revokedAt: null,
-  };
-  await Promise.all([
-    putJson(key.client(clientId), client),
-    putJson(key.clientToken(tokenHash), { clientId }),
-    putJson(key.pending(agent.id, body.requestId), { ...pending, status: "approved", clientId, clientToken, resolvedAt: timestamp }),
-    putJson(key.device(agent.id), { ...agent, pairedAt: agent.pairedAt || timestamp }),
-  ]);
+    status: "approved",
+    clientId,
+    clientToken,
+    resolvedAt: timestamp,
+  });
   return json({ ok: true, clientId });
 }
 
@@ -296,8 +313,6 @@ async function pollAgent(request) {
   const agent = await authenticateAgent(request);
   if (!agent) return jsonError("设备认证失败", 401);
   const after = Math.max(0, Number.parseInt(new URL(request.url).searchParams.get("after") || "0", 10) || 0);
-  const timestamp = now();
-  if (timestamp - agent.lastSeenAt > 4_000) await putJson(key.device(agent.id), { ...agent, lastSeenAt: timestamp });
   const [messages, pairRequests] = await Promise.all([
     readMessages(`agent:${agent.id}`, after),
     readPairRequests(agent.id, after),
@@ -312,7 +327,6 @@ async function pollClient(request) {
   if (!client) return jsonError("手机认证失败", 401);
   const after = Math.max(0, Number.parseInt(new URL(request.url).searchParams.get("after") || "0", 10) || 0);
   const timestamp = now();
-  if (timestamp - client.lastSeenAt > 10_000) await putJson(key.client(client.id), { ...client, lastSeenAt: timestamp });
   const [messages, device] = await Promise.all([
     readMessages(`client:${client.id}`, after),
     getJson(key.device(client.deviceId)),
@@ -336,7 +350,10 @@ async function sendFromAgent(request) {
   if (!validId(body.clientId)) return jsonError("手机设备无效");
   const encoded = JSON.stringify(body.envelope);
   if (encoded.length > 1_000_000) return jsonError("消息过大", 413);
-  const client = await getJson(key.client(body.clientId));
+  const pendingDeviceId = pairRequestDeviceId(body.clientId);
+  const client = pendingDeviceId
+    ? await getJson(key.pending(pendingDeviceId, body.clientId))
+    : await getJson(key.client(body.clientId));
   if (!client || client.deviceId !== agent.id || client.revokedAt) return jsonError("手机设备不存在", 404);
   const id = await addMessage({ deviceId: agent.id, senderId: `agent:${agent.id}`, targetId: `client:${client.id}`, envelope: encoded });
   return json({ ok: true, id });
@@ -365,9 +382,13 @@ async function revokeClient(request) {
   if (!agent) return jsonError("设备认证失败", 401);
   const body = await readJson(request, 8_000);
   if (!validId(body.clientId)) return jsonError("手机设备无效");
-  const client = await getJson(key.client(body.clientId));
+  const pendingDeviceId = pairRequestDeviceId(body.clientId);
+  const client = pendingDeviceId
+    ? await getJson(key.pending(pendingDeviceId, body.clientId))
+    : await getJson(key.client(body.clientId));
   if (client?.deviceId === agent.id && !client.revokedAt) {
-    await putJson(key.client(client.id), { ...client, revokedAt: now() });
+    const path = pendingDeviceId ? key.pending(pendingDeviceId, body.clientId) : key.client(client.id);
+    await putJson(path, { ...client, status: pendingDeviceId ? "revoked" : client.status, revokedAt: now() });
   }
   return json({ ok: true });
 }
@@ -377,7 +398,6 @@ async function importClients(request) {
   if (!agent) return jsonError("设备认证失败", 401);
   const body = await readJson(request);
   if (!Array.isArray(body.clients) || body.clients.length > 100) return jsonError("迁移数据无效");
-  const writes = [];
   let imported = 0;
   for (const source of body.clients) {
     if (!validId(source.id) || !validHash(source.tokenHash) || !validPublicKey(source.publicKey)) continue;
@@ -390,13 +410,10 @@ async function importClients(request) {
       lastSeenAt: Number(source.lastSeenAt) || now(),
       revokedAt: source.revokedAt ? Number(source.revokedAt) : null,
     };
-    writes.push(
-      putJson(key.client(client.id), client),
-      putJson(key.clientToken(client.tokenHash), { clientId: client.id }),
-    );
+    await putJson(key.client(client.id), client);
+    await putJson(key.clientToken(client.tokenHash), { clientId: client.id });
     imported += 1;
   }
-  await Promise.all(writes);
   return json({ ok: true, imported });
 }
 
@@ -413,12 +430,10 @@ async function legacyPair(request) {
   const tokenHash = await sha256(clientToken);
   const timestamp = now();
   const client = { id: clientId, deviceId: device.id, tokenHash, publicKey: body.publicKey, createdAt: timestamp, lastSeenAt: timestamp, revokedAt: null };
-  await Promise.all([
-    putJson(key.client(clientId), client),
-    putJson(key.clientToken(tokenHash), { clientId }),
-    db.delete(key.code(body.codeHash)),
-    addMessage({ deviceId: device.id, senderId: clientId, targetId: `agent:${device.id}`, kind: "pairing", envelope: JSON.stringify({ clientId, publicKey: body.publicKey, codeHash: body.codeHash }) }),
-  ]);
+  await putJson(key.client(clientId), client);
+  await putJson(key.clientToken(tokenHash), { clientId });
+  await db.delete(key.code(body.codeHash));
+  await addMessage({ deviceId: device.id, senderId: clientId, targetId: `agent:${device.id}`, kind: "pairing", envelope: JSON.stringify({ clientId, publicKey: body.publicKey, codeHash: body.codeHash }) });
   return json({ clientId, clientToken, device: { id: device.id, name: device.name, platform: device.platform, publicKey: device.publicKey } });
 }
 
@@ -428,10 +443,8 @@ async function setPairCode(request) {
   const body = await readJson(request, 8_000);
   if (!validHash(body.codeHash)) return jsonError("配对码无效");
   const expiresAt = now() + 10 * 60_000;
-  await Promise.all([
-    putJson(key.code(body.codeHash), { deviceId: agent.id, expiresAt }),
-    putJson(key.device(agent.id), { ...agent, lastSeenAt: now() }),
-  ]);
+  await putJson(key.code(body.codeHash), { deviceId: agent.id, expiresAt });
+  await putJson(key.device(agent.id), { ...agent, lastSeenAt: now() });
   return json({ ok: true, expiresAt });
 }
 

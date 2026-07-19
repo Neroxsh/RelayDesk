@@ -124,6 +124,7 @@ async function request(config, pathname, options = {}) {
     "content-type": "application/json",
     ...(config.siteToken ? { "OAI-Sites-Authorization": `Bearer ${config.siteToken}` } : {}),
     ...(options.auth === false ? {} : { authorization: `Bearer ${config.agentToken}` }),
+    "x-relaydesk-device-id": config.deviceId,
     ...(options.headers ?? {}),
   };
   let status;
@@ -522,8 +523,13 @@ async function main() {
   console.log(`电脑控制中心：${CONTROL_URL}`);
 
   let delay = 700;
+  let lastHeartbeatAt = 0;
   while (true) {
     try {
+      if (Date.now() - lastHeartbeatAt >= 5_000) {
+        await request(config, "/api/agent/heartbeat", { method: "POST" });
+        lastHeartbeatAt = Date.now();
+      }
       await poll(config);
       await syncExternalChanges(config);
       delay = 700;
