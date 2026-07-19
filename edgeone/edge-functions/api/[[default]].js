@@ -377,6 +377,8 @@ async function importClients(request) {
   if (!agent) return jsonError("设备认证失败", 401);
   const body = await readJson(request);
   if (!Array.isArray(body.clients) || body.clients.length > 100) return jsonError("迁移数据无效");
+  const writes = [];
+  let imported = 0;
   for (const source of body.clients) {
     if (!validId(source.id) || !validHash(source.tokenHash) || !validPublicKey(source.publicKey)) continue;
     const client = {
@@ -388,10 +390,14 @@ async function importClients(request) {
       lastSeenAt: Number(source.lastSeenAt) || now(),
       revokedAt: source.revokedAt ? Number(source.revokedAt) : null,
     };
-    await putJson(key.client(client.id), client);
-    await putJson(key.clientToken(client.tokenHash), { clientId: client.id });
+    writes.push(
+      putJson(key.client(client.id), client),
+      putJson(key.clientToken(client.tokenHash), { clientId: client.id }),
+    );
+    imported += 1;
   }
-  return json({ ok: true, imported: body.clients.length });
+  await Promise.all(writes);
+  return json({ ok: true, imported });
 }
 
 async function legacyPair(request) {
