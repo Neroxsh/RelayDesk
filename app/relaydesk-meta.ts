@@ -52,3 +52,15 @@ export function providerName(provider: Provider) {
 export function messageSignature(message: Message) {
   return `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`;
 }
+
+export function mergeSessionMessages(previous: Message[], incoming: Message[]) {
+  const merged = [...previous];
+  const seen = new Set(previous.map(messageSignature));
+  for (const message of incoming) {
+    const signature = messageSignature(message);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    merged.push(message);
+  }
+  return merged.slice(-240);
+}

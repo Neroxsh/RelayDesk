@@ -95,6 +95,8 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(conversation, /需确认/);
   assert.match(conversation, /自动执行/);
   assert.match(page, /session:watch/);
+  assert.match(page, /mergeSessionMessages/);
+  assert.match(meta, /export function mergeSessionMessages/);
   assert.match(page, /visibilitychange/);
   assert.match(page, /updateViaCache: "none"/);
   assert.match(css, /\.app-shell\.has-selection \.conversation-panel \{ position: fixed; inset: 0/);
@@ -108,9 +110,11 @@ test("the agent persists and renews a selected-session subscription", async () =
   assert.match(agent, /\["session:get", "session:watch"\]/);
   assert.match(agent, /client\.watch = watch/);
   assert.match(agent, /subscriptions\.set\(clientId, \{ \.\.\.client\.watch, refreshedAt: Date\.now\(\) \}\)/);
-  assert.match(agent, /Date\.now\(\) - lastExternalSyncAt < 900/);
+  assert.match(agent, /Date\.now\(\) - lastExternalSyncAt < 3_000/);
   assert.match(agent, /async function sessionDetail/);
   assert.match(agent, /provider === "codex" && sessionId === "__current__"/);
+  assert.match(agent, /stableSessionSnapshot/);
+  assert.match(agent, /sendBestEffort/);
 });
 
 test("the desktop bridge never exposes an arbitrary shell endpoint", async () => {
@@ -133,6 +137,8 @@ test("current-window injection is restricted to the Codex composer", async () =>
   assert.match(script, /Current\.ClassName -like "ProseMirror\*"/);
   assert.match(script, /unsent text in its composer/);
   assert.match(script, /SendWait\("\{ENTER\}"\)/);
+  assert.match(script, /OutputEncoding/);
+  assert.match(script, /AllowUnavailable/);
 });
 
 test("the mainland entry runs the RelayDesk API on strongly consistent storage", async () => {

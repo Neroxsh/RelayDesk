@@ -6,6 +6,9 @@ param(
   [switch]$StashDraft
 )
 
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
+
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -31,9 +34,14 @@ try {
   $prompt = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($PromptBase64))
   if ([string]::IsNullOrWhiteSpace($prompt)) { throw "Prompt is empty" }
 
-  function Get-ComposerText($element) {
-    $pattern = $element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-    $text = $pattern.DocumentRange.GetText(4096).Trim()
+  function Get-ComposerText($element, [switch]$AllowUnavailable) {
+    try {
+      $pattern = $element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+      $text = $pattern.DocumentRange.GetText(4096).Trim()
+    } catch {
+      if ($AllowUnavailable) { return "" }
+      throw
+    }
     $textBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
     if ($textBase64 -in @(
       "6KaB5rGC5ZCO57ut5Y+Y5pu0",
@@ -200,14 +208,21 @@ try {
         -not $_.Current.IsOffscreen -and
         $_.Current.Name -match '^(发送|发送消息|Send|Submit)$'
       } | Select-Object -First 1
+      $submitted = $false
       if ($sendButton) {
-        $invoke = $sendButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $invoke.Invoke()
-      } else {
+        try {
+          $invoke = $sendButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+          $invoke.Invoke()
+          $submitted = $true
+        } catch { }
+      }
+      if (-not $submitted) {
         [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
       }
       Start-Sleep -Milliseconds 500
-      $remaining = Get-ComposerText $composer
+      # Codex replaces the composer element as soon as a message is accepted. A stale
+      # automation element here means the submit succeeded, not that the request failed.
+      $remaining = Get-ComposerText $composer -AllowUnavailable
       if ($remaining.Contains($prompt)) { throw "Codex kept the remote message as a draft instead of sending it" }
     }
     Start-Sleep -Milliseconds 160

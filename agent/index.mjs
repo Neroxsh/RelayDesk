@@ -136,9 +136,63 @@ async function send(config, clientId, payload) {
 
 const activeRuns = new Map();
 const subscriptions = new Map();
+const stableSnapshots = new Map();
 let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
 const SUBSCRIPTION_TTL = 45_000;
+
+function messageSignature(message) {
+  return `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`;
+}
+
+function stableSessionSnapshot(session) {
+  const previous = stableSnapshots.get(session.key);
+  const changedCurrentSession = Boolean(
+    previous?.currentWindow
+    && session.currentWindow
+    && previous.sourceSessionId !== session.sourceSessionId,
+  );
+  if (!previous || changedCurrentSession) {
+    stableSnapshots.set(session.key, session);
+    return session;
+  }
+  const messages = [...(previous.messages ?? [])];
+  const seen = new Set(messages.map(messageSignature));
+  for (const message of session.messages ?? []) {
+    const signature = messageSignature(message);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    messages.push(message);
+  }
+  const merged = { ...previous, ...session, messages: messages.slice(-240) };
+  stableSnapshots.set(session.key, merged);
+  return merged;
+}
+
+function isRelayTimeout(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /aborted|aborterror|timeout|timed out/i.test(message);
+}
+
+function userFacingError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (/GetCurrentPattern|AutomationElement|element is not available/i.test(message)) {
+    return "Codex 输入框刚刚刷新，请再试一次";
+  }
+  if (isRelayTimeout(error)) return "连接短暂超时，请再试一次";
+  const clean = message.replace(/[\u0000-\u001f]+/g, " ").trim();
+  return clean && clean.length <= 180 ? clean : "电脑端暂时无法完成这次操作";
+}
+
+async function sendBestEffort(config, clientId, payload) {
+  try {
+    await send(config, clientId, payload);
+    return true;
+  } catch (error) {
+    console.error(`状态回传失败：${error instanceof Error ? error.message : error}`);
+    return false;
+  }
+}
 
 async function publicSessions() {
   const source = await listSessions();
@@ -183,9 +237,10 @@ async function currentCodexDetail() {
 }
 
 async function sessionDetail(provider, sessionId) {
-  return provider === "codex" && sessionId === "__current__"
+  const session = await (provider === "codex" && sessionId === "__current__"
     ? currentCodexDetail()
-    : getSession(provider, sessionId);
+    : getSession(provider, sessionId));
+  return stableSessionSnapshot(session);
 }
 
 async function watchSession(config, clientId, session) {
@@ -237,23 +292,23 @@ async function handleCommand(config, clientId, payload) {
         if (activeRuns.has(key)) throw new Error("正在把上一条指令发送到 Codex");
         const run = sendToCurrentCodex(prompt);
         activeRuns.set(key, run);
-        await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: "window" });
+        void sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: "window" });
         try {
           await run.completed;
-          await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
         } catch (error) {
-          await send(config, clientId, {
+          await sendBestEffort(config, clientId, {
             type: "run:status",
             requestId,
             sessionKey: key,
             status: "failed",
-            error: error instanceof Error ? error.message : "发送失败",
+            error: userFacingError(error),
           });
-          throw error;
+          return;
         } finally {
           activeRuns.delete(key);
           invalidateSessions();
         }
+        await sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
         return;
       }
       const session = await getSession(payload.provider, payload.sessionId);
@@ -270,34 +325,41 @@ async function handleCommand(config, clientId, payload) {
         }).catch(() => undefined);
       });
       activeRuns.set(key, run);
-      await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "running", mode });
+      void sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "running", mode });
       try {
         await run.completed;
         invalidateSessions();
-        await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "completed" });
+        await sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "completed" });
       } catch (error) {
-        await send(config, clientId, {
+        await sendBestEffort(config, clientId, {
           type: "run:status",
           requestId,
           sessionKey: key,
           status: "failed",
-          error: error instanceof Error ? error.message : "执行失败",
+          error: userFacingError(error),
         });
       } finally {
         activeRuns.delete(key);
         invalidateSessions();
         const updated = await getSession(session.provider, session.id).catch(() => null);
-        if (updated) await send(config, clientId, { type: "session:snapshot", requestId, session: updated });
-        await send(config, clientId, { type: "sessions:snapshot", requestId, sessions: await publicSessions() });
+        if (updated) {
+          await sendBestEffort(config, clientId, {
+            type: "session:snapshot",
+            requestId,
+            session: stableSessionSnapshot(updated),
+          });
+        }
+        await sendBestEffort(config, clientId, { type: "sessions:snapshot", requestId, sessions: await publicSessions() });
       }
       return;
     }
     throw new Error("手机端请求类型不受支持");
   } catch (error) {
-    await send(config, clientId, {
+    if (isRelayTimeout(error)) return;
+    await sendBestEffort(config, clientId, {
       type: "request:error",
       requestId,
-      error: error instanceof Error ? error.message : "请求失败",
+      error: userFacingError(error),
     });
   }
 }
@@ -407,7 +469,7 @@ async function revokeClient(config, body) {
 }
 
 async function syncExternalChanges(config) {
-  if (Date.now() - lastExternalSyncAt < 900) return;
+  if (Date.now() - lastExternalSyncAt < 3_000) return;
   lastExternalSyncAt = Date.now();
   invalidateSessions();
   const sessions = await publicSessions();

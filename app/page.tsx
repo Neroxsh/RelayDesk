@@ -8,6 +8,7 @@ import { decryptJson, encryptJson, importSessionKey, requestId } from "./remote-
 import {
   cursorKey,
   LEGACY_STORAGE_KEY,
+  mergeSessionMessages,
   messageSignature,
   providerName,
   STORAGE_KEY,
@@ -132,7 +133,12 @@ export default function Home() {
       const previous = detailsRef.current[session.key];
       const previousSignatures = new Set((previous?.messages ?? []).map(messageSignature));
       const additions = session.messages.filter((message) => !previousSignatures.has(messageSignature(message)));
-      detailsRef.current = { ...detailsRef.current, [session.key]: session };
+      const mergedSession = {
+        ...previous,
+        ...session,
+        messages: mergeSessionMessages(previous?.messages ?? [], session.messages),
+      };
+      detailsRef.current = { ...detailsRef.current, [session.key]: mergedSession };
       setDetails(detailsRef.current);
 
       if (additions.length) {
@@ -152,7 +158,7 @@ export default function Home() {
 
       if (waitingForReplyRef.current.has(session.key)) {
         const baseline = waitingForReplyRef.current.get(session.key);
-        const latestAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+        const latestAssistant = [...mergedSession.messages].reverse().find((message) => message.role === "assistant");
         const latestSignature = latestAssistant ? messageSignature(latestAssistant) : null;
         if (latestSignature && latestSignature !== baseline) {
           waitingForReplyRef.current.delete(session.key);
