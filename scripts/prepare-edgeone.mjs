@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,8 +27,30 @@ if (process.env.RELAYDESK_REFRESH_SHELL === "1") {
   if (!response.ok) throw new Error(`无法读取已发布的手机页面（${response.status}）`);
   html = await response.text();
 }
-if (!html.includes(`/assets/${path.basename(pageAsset.file)}`)) {
-  throw new Error("线上页面与本地构建版本不一致，请先发布当前 Sites 版本");
+for (const entry of Object.values(builtManifest)) {
+  if (!entry?.file?.endsWith(".js") || !entry.name) continue;
+  const escapedName = entry.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  html = html.replace(
+    new RegExp(`/assets/${escapedName}-[A-Za-z0-9_-]+\\.js`, "g"),
+    `/${entry.file}`,
+  );
+}
+
+const builtAssets = await readdir(path.join(client, "assets"));
+for (const cssFile of builtAssets.filter((file) => file.endsWith(".css"))) {
+  const stem = cssFile.replace(/-[A-Za-z0-9_-]+\.css$/, "");
+  const escapedStem = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  html = html.replace(
+    new RegExp(`/assets/${escapedStem}-[A-Za-z0-9_-]+\\.css`, "g"),
+    `/assets/${cssFile}`,
+  );
+}
+
+const missingAssets = [...html.matchAll(/\/assets\/([^"'<>\s]+)/g)]
+  .map((match) => match[1].replace(/\\+$/, ""))
+  .filter((file) => !builtAssets.includes(file));
+if (missingAssets.length || !html.includes(`/assets/${path.basename(pageAsset.file)}`)) {
+  throw new Error(`页面资源映射失败：${[...new Set(missingAssets)].join(", ") || "page"}`);
 }
 
 const resolvedOutput = path.resolve(output);

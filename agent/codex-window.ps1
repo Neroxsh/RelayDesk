@@ -199,26 +199,10 @@ try {
       [System.Windows.Forms.SendKeys]::SendWait("^a")
       [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
     } else {
-      $updated = $root.FindAll(
-        [System.Windows.Automation.TreeScope]::Subtree,
-        [System.Windows.Automation.Condition]::TrueCondition
-      )
-      $sendButton = $updated | Where-Object {
-        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
-        -not $_.Current.IsOffscreen -and
-        $_.Current.Name -match '^(发送|发送消息|Send|Submit)$'
-      } | Select-Object -First 1
-      $submitted = $false
-      if ($sendButton) {
-        try {
-          $invoke = $sendButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-          $invoke.Invoke()
-          $submitted = $true
-        } catch { }
-      }
-      if (-not $submitted) {
-        [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-      }
+      # A UI Automation Invoke can start a task without updating Codex's visible
+      # conversation state. Submit through the focused composer just like a user.
+      $composer.SetFocus()
+      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
       Start-Sleep -Milliseconds 500
       # Codex replaces the composer element as soon as a message is accepted. A stale
       # automation element here means the submit succeeded, not that the request failed.

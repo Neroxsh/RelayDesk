@@ -98,17 +98,28 @@ export default function Home() {
     if (!current) throw new Error("手机尚未连接");
     if (!keyRef.current) keyRef.current = await importSessionKey(current.key);
     const envelope = await encryptJson(keyRef.current, payload);
-    const response = await fetch("/api/client/send", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${current.clientToken}`,
-        "x-relaydesk-client-id": current.clientId,
-      },
-      body: JSON.stringify({ envelope }),
-    });
-    const data = await response.json().catch(() => ({})) as { error?: string };
-    if (!response.ok) throw new Error(data.error ?? "发送失败");
+    let lastError = "中继暂时不稳定";
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const response = await fetch("/api/client/send", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${current.clientToken}`,
+            "x-relaydesk-client-id": current.clientId,
+          },
+          body: JSON.stringify({ envelope }),
+        });
+        const data = await response.json().catch(() => ({})) as { error?: string };
+        if (response.ok) return;
+        lastError = data.error ?? lastError;
+        if (response.status < 500 && response.status !== 429) throw new Error(lastError);
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : lastError;
+      }
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
+    }
+    throw new Error(lastError.includes("545") ? "中继暂时不稳定，请再试一次" : lastError);
   }, []);
 
   const handlePayload = useCallback((payload: RemotePayload) => {

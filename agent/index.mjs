@@ -137,6 +137,7 @@ async function send(config, clientId, payload) {
 const activeRuns = new Map();
 const subscriptions = new Map();
 const stableSnapshots = new Map();
+const handledRequests = new Map();
 let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
 const SUBSCRIPTION_TTL = 45_000;
@@ -185,13 +186,32 @@ function userFacingError(error) {
 }
 
 async function sendBestEffort(config, clientId, payload) {
-  try {
-    await send(config, clientId, payload);
-    return true;
-  } catch (error) {
-    console.error(`状态回传失败：${error instanceof Error ? error.message : error}`);
-    return false;
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await send(config, clientId, payload);
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 250 * (2 ** attempt)));
+    }
   }
+  console.error(`状态回传失败：${lastError instanceof Error ? lastError.message : lastError}`);
+  return false;
+}
+
+function claimMutatingRequest(clientId, payload) {
+  if (!["session:send", "session:stop"].includes(payload?.type) || !payload?.requestId) return true;
+  const current = Date.now();
+  if (handledRequests.size > 200) {
+    for (const [key, expiresAt] of handledRequests) {
+      if (expiresAt <= current) handledRequests.delete(key);
+    }
+  }
+  const key = `${clientId}:${payload.requestId}`;
+  if ((handledRequests.get(key) ?? 0) > current) return false;
+  handledRequests.set(key, current + 10 * 60_000);
+  return true;
 }
 
 async function publicSessions() {
@@ -394,6 +414,7 @@ async function poll(config) {
     try {
       const envelope = JSON.parse(message.envelope);
       const payload = await decryptJson(await clientKey(config, clientId), envelope);
+      if (!claimMutatingRequest(clientId, payload)) continue;
       void handleCommand(config, clientId, payload).catch((error) => {
         console.error(`手机请求处理失败：${error instanceof Error ? error.message : error}`);
       });

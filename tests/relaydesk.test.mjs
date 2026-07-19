@@ -96,6 +96,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(conversation, /自动执行/);
   assert.match(page, /session:watch/);
   assert.match(page, /mergeSessionMessages/);
+  assert.match(page, /attempt < 4/);
   assert.match(meta, /export function mergeSessionMessages/);
   assert.match(page, /visibilitychange/);
   assert.match(page, /updateViaCache: "none"/);
@@ -115,6 +116,7 @@ test("the agent persists and renews a selected-session subscription", async () =
   assert.match(agent, /provider === "codex" && sessionId === "__current__"/);
   assert.match(agent, /stableSessionSnapshot/);
   assert.match(agent, /sendBestEffort/);
+  assert.match(agent, /claimMutatingRequest/);
 });
 
 test("the desktop bridge never exposes an arbitrary shell endpoint", async () => {
@@ -139,6 +141,7 @@ test("current-window injection is restricted to the Codex composer", async () =>
   assert.match(script, /SendWait\("\{ENTER\}"\)/);
   assert.match(script, /OutputEncoding/);
   assert.match(script, /AllowUnavailable/);
+  assert.doesNotMatch(script, /InvokePattern/);
 });
 
 test("the mainland entry runs the RelayDesk API on strongly consistent storage", async () => {
@@ -152,6 +155,7 @@ test("the mainland entry runs the RelayDesk API on strongly consistent storage",
   assert.match(proxy, /path === "\/api\/client\/send"/);
   assert.match(proxy, /path === "\/api\/agent\/import"/);
   assert.doesNotMatch(proxy, /chatgpt\.site/);
-  assert.match(prepare, /线上页面与本地构建版本不一致/);
+  assert.match(prepare, /missingAssets/);
+  assert.match(prepare, /builtManifest/);
   assert.equal(JSON.parse(pkg).scripts["build:edgeone"].includes("prepare-edgeone.mjs"), true);
 });
