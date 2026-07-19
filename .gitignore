@@ -39,6 +39,7 @@ next-env.d.ts
 *.tsbuildinfo
 /dist/
 /edgeone-dist/
+/edgeone/node_modules/
 /.wrangler/
 /outputs/
 /work/
@@ -47,3 +48,8 @@ next-env.d.ts
 /*.egg-info/
 __pycache__/
 *.py[cod]
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*

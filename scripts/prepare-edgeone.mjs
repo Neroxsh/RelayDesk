@@ -6,6 +6,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.join(root, "edgeone-dist");
 const client = path.join(root, "dist", "client");
 const edgeFunctions = path.join(root, "edgeone", "edge-functions");
+const edgePackage = path.join(root, "edgeone", "package.json");
+const edgeDependencies = path.join(root, "edgeone", "node_modules", "@edgeone");
 const savedShell = path.join(root, "edgeone", "shell.html");
 const sourceUrl = (process.env.RELAYDESK_SHELL_URL || "https://relay.xingshihao.site").replace(/\/$/, "");
 
@@ -37,6 +39,9 @@ await rm(resolvedOutput, { recursive: true, force: true });
 await cp(client, resolvedOutput, { recursive: true });
 await mkdir(path.join(resolvedOutput, "edge-functions"), { recursive: true });
 await cp(edgeFunctions, path.join(resolvedOutput, "edge-functions"), { recursive: true });
+await cp(edgePackage, path.join(resolvedOutput, "package.json"));
+await mkdir(path.join(resolvedOutput, "node_modules", "@edgeone"), { recursive: true });
+await cp(edgeDependencies, path.join(resolvedOutput, "node_modules", "@edgeone"), { recursive: true });
 await writeFile(path.join(resolvedOutput, "index.html"), html, "utf8");
 
 console.log(`EdgeOne 部署包已生成：${resolvedOutput}`);
