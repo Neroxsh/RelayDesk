@@ -134,3 +134,17 @@ test("current-window injection is restricted to the Codex composer", async () =>
   assert.match(script, /unsent text in its composer/);
   assert.match(script, /SendWait\("\{ENTER\}"\)/);
 });
+
+test("the mainland entry only proxies RelayDesk API traffic to the fixed relay", async () => {
+  const [proxy, prepare, pkg] = await Promise.all([
+    readFile(new URL("../edgeone/edge-functions/api/[[default]].js", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/prepare-edgeone.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ]);
+  assert.match(proxy, /relaydesk-private-remote\.able-bream-1696\.chatgpt\.site/);
+  assert.match(proxy, /headers\.delete\(name\)/);
+  assert.match(proxy, /cache-control", "no-store/);
+  assert.doesNotMatch(proxy, /new URL\(context\.params/);
+  assert.match(prepare, /线上页面与本地构建版本不一致/);
+  assert.equal(JSON.parse(pkg).scripts["build:edgeone"].includes("prepare-edgeone.mjs"), true);
+});
