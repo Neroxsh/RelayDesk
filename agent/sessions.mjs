@@ -225,36 +225,99 @@ function pushMessage(messages, role, content, timestamp, meta) {
   });
 }
 
-function codexMessages(rows) {
+function toolLabel(name, running) {
+  const labels = {
+    exec: ["正在运行本机操作", "本机操作已完成"],
+    wait: ["正在等待后台任务", "后台任务已返回"],
+    apply_patch: ["正在更新文件", "文件已更新"],
+    browser: ["正在操作网页", "网页操作已完成"],
+  };
+  const pair = labels[String(name ?? "").toLowerCase()] ?? ["正在执行操作", "操作已完成"];
+  return pair[running ? 0 : 1];
+}
+
+function activityItem(row, index, label, status = "completed", detail = "") {
+  return {
+    id: `${row?.timestamp ?? "activity"}-${index}`,
+    label,
+    detail,
+    status,
+    timestamp: row?.timestamp ?? null,
+  };
+}
+
+export function parseCodexTranscript(rows) {
   const eventMessages = [];
   const responseMessages = [];
-  for (const row of rows) {
+  const activity = [];
+  const calls = new Map();
+  const openCalls = new Set();
+  let state = "idle";
+  let sawTaskSignal = false;
+  for (const [index, row] of rows.entries()) {
     const timestamp = row?.timestamp ?? null;
     if (row?.type === "event_msg") {
       if (row.payload?.type === "user_message") pushMessage(eventMessages, "user", row.payload.message, timestamp);
       if (row.payload?.type === "agent_message") pushMessage(eventMessages, "assistant", row.payload.message, timestamp);
+      if (row.payload?.type === "task_started") {
+        sawTaskSignal = true;
+        state = "working";
+        activity.push(activityItem(row, index, "开始处理", "running"));
+      }
+      if (row.payload?.type === "patch_apply_end") {
+        const count = Array.isArray(row.payload.changes) ? row.payload.changes.length : 0;
+        activity.push(activityItem(row, index, count ? `已更新 ${count} 个文件` : "文件已更新"));
+      }
+      if (row.payload?.type === "task_complete") {
+        sawTaskSignal = true;
+        state = "idle";
+        const duration = Number(row.payload.duration_ms ?? 0);
+        const detail = duration > 0 ? `${Math.max(1, Math.round(duration / 1000))} 秒` : "";
+        activity.push(activityItem(row, index, "任务完成", "completed", detail));
+      }
     }
     if (row?.type === "response_item" && row.payload?.type === "message") {
       const role = row.payload.role === "assistant" ? "assistant" : row.payload.role === "user" ? "user" : null;
       if (role) pushMessage(responseMessages, role, textFromContent(row.payload.content), timestamp);
     }
-    if (row?.type === "response_item" && row.payload?.type === "function_call") {
-      pushMessage(responseMessages, "tool", `调用工具：${row.payload.name ?? "tool"}`, timestamp, {
-        name: row.payload.name ?? "tool",
-      });
+    if (row?.type === "response_item" && ["function_call", "custom_tool_call"].includes(row.payload?.type)) {
+      const callId = row.payload.call_id ?? row.payload.id ?? `${index}`;
+      const item = activityItem(row, index, toolLabel(row.payload.name, true), "running");
+      calls.set(callId, { position: activity.length, name: row.payload.name });
+      openCalls.add(callId);
+      activity.push(item);
+    }
+    if (row?.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(row.payload?.type)) {
+      const call = calls.get(row.payload.call_id);
+      if (call && activity[call.position]) {
+        activity[call.position] = {
+          ...activity[call.position],
+          label: toolLabel(call.name, false),
+          status: "completed",
+        };
+      }
+      openCalls.delete(row.payload.call_id);
     }
   }
-  return eventMessages.length ? eventMessages : responseMessages;
+  const messages = eventMessages.length ? eventMessages : responseMessages;
+  if (!sawTaskSignal) state = openCalls.size ? "working" : "idle";
+  return { messages, activity: activity.slice(-40), state };
 }
 
-function claudeMessages(rows) {
+export function parseClaudeTranscript(rows) {
   const messages = [];
-  for (const row of rows) {
+  const activity = [];
+  for (const [index, row] of rows.entries()) {
     if ((row?.type === "user" || row?.type === "assistant") && !row?.isMeta) {
       pushMessage(messages, row.type, textFromContent(row.message?.content), row.timestamp ?? null);
+      for (const item of Array.isArray(row.message?.content) ? row.message.content : []) {
+        if (item?.type === "tool_use") {
+          activity.push(activityItem(row, index, `调用 ${item.name ?? "工具"}`));
+        }
+      }
     }
   }
-  return messages;
+  return { messages, activity: activity.slice(-40), state: "idle" };
 }
 
 export async function getSession(provider, id) {
@@ -262,11 +325,13 @@ export async function getSession(provider, id) {
   const session = sessions.find((item) => item.provider === provider && item.id === id);
   if (!session) throw new Error("会话不存在或已被移动");
   const rows = parseLines(await readTail(session.filePath));
-  const messages = provider === "codex" ? codexMessages(rows) : claudeMessages(rows);
+  const transcript = provider === "codex" ? parseCodexTranscript(rows) : parseClaudeTranscript(rows);
   return {
     ...session,
     filePath: undefined,
-    messages: messages.slice(-120),
+    messages: transcript.messages.slice(-120),
+    activity: transcript.activity,
+    state: transcript.state,
   };
 }
 

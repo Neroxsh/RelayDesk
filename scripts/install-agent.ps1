@@ -21,6 +21,11 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   throw "Node.js 22 or newer is required."
 }
 
+$nodeMajor = [int](& node -p "process.versions.node.split('.')[0]")
+if ($nodeMajor -lt 22) {
+  throw "Node.js 22 or newer is required."
+}
+
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $startupCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runner`" -RelayUrl `"$relay`""
 Set-ItemProperty -Path $runKey -Name "RelayDeskAgent" -Value $startupCommand

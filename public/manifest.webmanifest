@@ -4,8 +4,8 @@
   "description": "从手机继续电脑上的 Codex 与 Claude Code 会话",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0c1017",
-  "theme_color": "#0c1017",
+  "background_color": "#f5f5f2",
+  "theme_color": "#f5f5f2",
   "lang": "zh-CN",
   "orientation": "portrait-primary"
 }

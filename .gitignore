@@ -41,3 +41,8 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/.venv/
+/build/
+/*.egg-info/
+__pycache__/
+*.py[cod]

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { decryptJson, deriveSessionKey, encryptJson, generateDeviceKeys, sha256 } from "../agent/crypto.mjs";
+import { parseCodexTranscript } from "../agent/sessions.mjs";
 
 test("desktop and phone derive the same end-to-end key", async () => {
   const desktop = await generateDeviceKeys();
@@ -13,26 +14,78 @@ test("desktop and phone derive the same end-to-end key", async () => {
   assert.deepEqual(await decryptJson(desktopKey, envelope), { type: "sessions:list", requestId: "test" });
 });
 
-test("the product ships pairing, project navigation, and separate provider workspaces", async () => {
-  const [page, manifest, migration] = await Promise.all([
+test("Codex transcript exposes visible messages and safe live progress", () => {
+  const rows = [
+    { timestamp: "2026-07-19T00:00:00Z", type: "event_msg", payload: { type: "user_message", message: "修复页面" } },
+    { timestamp: "2026-07-19T00:00:01Z", type: "event_msg", payload: { type: "task_started" } },
+    { timestamp: "2026-07-19T00:00:02Z", type: "event_msg", payload: { type: "agent_reasoning", text: "private reasoning" } },
+    { timestamp: "2026-07-19T00:00:03Z", type: "event_msg", payload: { type: "agent_message", message: "正在检查。" } },
+    { timestamp: "2026-07-19T00:00:04Z", type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "call-1" } },
+    { timestamp: "2026-07-19T00:00:05Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call-1" } },
+    { timestamp: "2026-07-19T00:00:06Z", type: "event_msg", payload: { type: "patch_apply_end", changes: [{}, {}] } },
+    { timestamp: "2026-07-19T00:00:07Z", type: "event_msg", payload: { type: "agent_message", message: "已经完成。" } },
+    { timestamp: "2026-07-19T00:00:08Z", type: "event_msg", payload: { type: "task_complete", duration_ms: 8_000 } },
+  ];
+  const transcript = parseCodexTranscript(rows);
+  assert.equal(transcript.state, "idle");
+  assert.deepEqual(transcript.messages.map((message) => [message.role, message.content]), [
+    ["user", "修复页面"],
+    ["assistant", "正在检查。"],
+    ["assistant", "已经完成。"],
+  ]);
+  assert.equal(transcript.messages.some((message) => message.content.includes("private reasoning")), false);
+  assert.equal(transcript.activity.some((item) => item.label === "本机操作已完成"), true);
+  assert.equal(transcript.activity.some((item) => item.label === "已更新 2 个文件"), true);
+  assert.equal(transcript.activity.at(-1).label, "任务完成");
+});
+
+test("an unfinished Codex task remains visibly in progress", () => {
+  const transcript = parseCodexTranscript([
+    { timestamp: "2026-07-19T00:00:01Z", type: "event_msg", payload: { type: "task_started" } },
+    { timestamp: "2026-07-19T00:00:02Z", type: "response_item", payload: { type: "function_call", name: "wait", call_id: "call-2" } },
+  ]);
+  assert.equal(transcript.state, "working");
+  assert.equal(transcript.activity.at(-1).status, "running");
+});
+
+test("the mobile UI keeps navigation and execution state within reach", async () => {
+  const [page, browser, conversation, pairing, meta, css, manifest, migration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/session-browser.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/conversation-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/pairing-screen.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/relaydesk-meta.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0002_cuddly_mephistopheles.sql", import.meta.url), "utf8"),
   ]);
-  assert.match(page, /16 位连接码/);
-  assert.match(page, /当前 Codex/);
-  assert.match(page, /电脑前台/);
-  assert.match(page, /项目/);
-  assert.match(page, /Codex/);
-  assert.match(page, /Claude Code/);
-  assert.match(page, /activeProvider/);
-  assert.match(page, /放开权限/);
+  assert.match(pairing, /16 位配对码/);
+  assert.match(browser, /Codex/);
+  assert.match(meta, /Claude Code/);
+  assert.match(conversation, /返回会话列表/);
+  assert.match(conversation, /回复会持续显示在这里/);
+  assert.match(conversation, /任务进行中/);
+  assert.match(conversation, /需确认/);
+  assert.match(conversation, /自动执行/);
+  assert.match(page, /session:watch/);
+  assert.match(page, /visibilitychange/);
+  assert.match(css, /\.app-shell\.has-selection \.conversation-panel \{ position: fixed; inset: 0/);
+  assert.match(css, /font-size: 16px/);
   assert.equal(JSON.parse(manifest).display, "standalone");
   assert.match(migration, /pending_pairs/);
-  assert.match(migration, /pair_key_hash/);
 });
 
-test("the desktop bridge never exposes an arbitrary shell command endpoint", async () => {
+test("the agent persists and renews a selected-session subscription", async () => {
+  const agent = await readFile(new URL("../agent/index.mjs", import.meta.url), "utf8");
+  assert.match(agent, /\["session:get", "session:watch"\]/);
+  assert.match(agent, /client\.watch = watch/);
+  assert.match(agent, /subscriptions\.set\(clientId, \{ \.\.\.client\.watch, refreshedAt: Date\.now\(\) \}\)/);
+  assert.match(agent, /Date\.now\(\) - lastExternalSyncAt < 900/);
+  assert.match(agent, /async function sessionDetail/);
+  assert.match(agent, /provider === "codex" && sessionId === "__current__"/);
+});
+
+test("the desktop bridge never exposes an arbitrary shell endpoint", async () => {
   const [agent, providers] = await Promise.all([
     readFile(new URL("../agent/index.mjs", import.meta.url), "utf8"),
     readFile(new URL("../agent/providers.mjs", import.meta.url), "utf8"),
@@ -41,7 +94,6 @@ test("the desktop bridge never exposes an arbitrary shell command endpoint", asy
   assert.match(agent, /payload\?\.type === "session:send"/);
   assert.match(agent, /prompt\.length > 12_000/);
   assert.match(agent, /message\.kind === "pair_request"/);
-  assert.match(agent, /selected\.currentWindow\s*\?\s*await currentCodexDetail\(\)/);
   assert.match(providers, /CommandType -eq 'Application'.*'\*\.cmd'/);
   assert.match(providers, /void completed\.catch/);
 });

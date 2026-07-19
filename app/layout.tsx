@@ -23,14 +23,14 @@ export async function generateMetadata(): Promise<Metadata> {
       url: origin,
       title,
       description,
-      images: [{ url: `${origin}/og-v4.png`, width: 1536, height: 1024, alt: "RelayDesk" }],
+      images: [{ url: `${origin}/og-v5.png`, width: 1536, height: 1024, alt: "RelayDesk mobile workspace" }],
     },
-    twitter: { card: "summary_large_image", title, description, images: [`${origin}/og-v4.png`] },
+    twitter: { card: "summary_large_image", title, description, images: [`${origin}/og-v5.png`] },
   };
 }
 
 export const viewport: Viewport = {
-  themeColor: "#0c1017",
+  themeColor: "#f5f5f2",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,

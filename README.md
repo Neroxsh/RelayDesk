@@ -1,46 +1,93 @@
 # RelayDesk
 
-RelayDesk 是一个独立的手机远程工作台。电脑上的常驻桥接程序读取本机 Codex / Claude Code 会话；手机网页按项目展示历史，并能继续会话或把指令直接发送到电脑当前 Codex 窗口。
+在手机上继续电脑里的 Codex 和 Claude Code。会话仍然运行在自己的电脑上，RelayDesk 只负责加密传输和移动端界面。
 
-## 日常使用
+[手机端](https://relay.xingshihao.site) · [问题反馈](https://github.com/Neroxsh/RelayDesk/issues)
 
-1. 电脑开机后，RelayDesk 会自动在后台运行。
-2. 在电脑上打开 [RelayDesk 电脑控制中心](http://127.0.0.1:43127)。
-3. 手机上打开 [RelayDesk](https://relay.xingshihao.site)。
-4. 首次连接时，在手机输入电脑控制中心显示的永久连接密钥。
-5. 电脑控制中心出现请求后，核对手机名称并点击“确认绑定”。
-6. 绑定完成后，手机以后直接打开即可，不需要 ChatGPT 账号，也不需要重复认证。
+## 开始使用
 
-电脑控制中心可以随时拒绝待确认请求，或解除已经永久绑定的手机。解除后，手机本地保存的凭据立即失效。
+目前优先支持 Windows 11，电脑需要安装 Node.js 22 或更高版本，并已能正常使用 Codex 或 Claude Code。
 
-## 两种发送方式
+### 从源码安装
 
-- **当前 Codex 窗口**：手机指令会让电脑短暂切换到当前 Codex，填入当前输入框并自动发送。适合“像坐在电脑前一样”操作正在看的任务。
-- **项目中的历史会话**：通过 Codex / Claude Code 的恢复会话能力在后台继续，不会切换电脑当前可见窗口。
+```powershell
+git clone https://github.com/Neroxsh/RelayDesk.git
+cd RelayDesk
+npm install
+npm run setup
+```
 
-## 安全设计
+### 用 pip 安装
 
-- 电脑只主动访问 HTTPS 中继，不开放公网端口。
-- 永久连接密钥明文只保存在电脑和输入它的手机上；中继保存摘要。
-- 新手机必须由电脑本机明确确认，不能仅凭密钥直接登录。
-- 手机与电脑使用 P-256 ECDH 派生 AES-256-GCM 密钥；会话内容以端到端加密信封中继。
-- 手机只能调用预定义的会话操作，不能提交任意系统命令。
-- “完全控制”只用于后台恢复会话，并会在手机端再次确认。
+```powershell
+pip install git+https://github.com/Neroxsh/RelayDesk.git
+relaydesk setup
+```
+
+安装完成后会打开电脑控制中心，并显示两个地址：
+
+- 电脑控制中心：`http://127.0.0.1:43127`
+- 手机端：`https://relay.xingshihao.site`
+
+手机输入电脑端显示的配对码，再回到电脑确认。确认一次后会保持连接，除非在电脑控制中心主动解除。
+
+## 能做什么
+
+- Codex 和 Claude Code 分开展示，并按项目整理会话。
+- 继续历史会话，或直接给当前 Codex 窗口发送指令。
+- 手机打开会话时，回答和任务进度会持续同步；切到后台后再次打开会自动补齐。
+- 在电脑控制中心查看、确认和解除已连接设备。
+- 安全模式只使用工具自身的受限执行；需要自动执行时可按会话切换。
+
+## 常用命令
+
+```powershell
+relaydesk setup                 # 安装并启动，Windows 下同时设置开机启动
+relaydesk status                # 检查电脑端是否正在运行
+relaydesk control               # 打开电脑控制中心
+relaydesk start                 # 在当前终端前台运行
+relaydesk setup --relay URL     # 使用自己的中继地址
+```
+
+从源码运行时，也可以使用 `npm run setup` 和 `npm run agent -- --relay URL`。
+
+## 它如何工作
+
+电脑端桥接只主动连接 HTTPS 中继，不会向公网开放电脑端口。手机与电脑完成配对后，双方通过 P-256 ECDH 建立密钥，并使用 AES-256-GCM 加密消息。中继负责暂存密文和在线状态，无法读取会话正文。
+
+电脑端只接受 RelayDesk 已定义的会话操作，不提供任意终端入口。配对码、设备密钥和已连接设备保存在 `%USERPROFILE%\.relaydesk\config.json`，不会进入项目目录。
+
+```text
+手机浏览器  ←── 端到端加密消息 ──→  HTTPS 中继  ←──→  电脑端桥接
+                                                    ├─ Codex
+                                                    └─ Claude Code
+```
 
 ## 项目结构
 
-- `app/`：手机 PWA 和中继 API。
-- `agent/`：Windows 常驻桥接、本机控制中心和当前 Codex 输入框控制。
-- `scripts/`：安装和开机启动脚本。
-- `db/`、`drizzle/`：中继数据库与迁移。
+```text
+app/          移动端 PWA 与中继 API
+agent/        电脑端桥接、会话解析和本机控制中心
+scripts/      安装与开机启动
+tests/        协议、解析、安全边界和界面回归测试
+drizzle/      中继数据库迁移
+```
 
-## 开发验证
+## 本地开发
 
 ```powershell
 npm install
-npm run db:generate
 npm run lint
 npm test
+npm run dev
 ```
 
-电脑凭据、永久连接密钥和已绑定手机信息保存在 `%USERPROFILE%\.relaydesk\config.json`，不会写入项目仓库。
+提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 中的方式报告。
+
+## 当前状态
+
+RelayDesk 仍在早期阶段。Windows、Codex Desktop 和 Claude Code 是当前主要测试组合；macOS/Linux 的开机启动尚未完善。默认中继用于快速体验，团队或公开部署建议使用自己的 Cloudflare 项目和域名。
+
+## License
+
+[MIT](LICENSE)

@@ -14,6 +14,7 @@ const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const HTTP_BRIDGE = path.join(path.dirname(fileURLToPath(import.meta.url)), "http-bridge.ps1");
 const command = process.argv[2] ?? "start";
+const DEFAULT_RELAY = "https://relay.xingshihao.site";
 const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 let bridgeProcess;
@@ -185,6 +186,7 @@ const activeRuns = new Map();
 const subscriptions = new Map();
 let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
+const SUBSCRIPTION_TTL = 45_000;
 
 async function publicSessions() {
   const source = await listSessions();
@@ -228,6 +230,26 @@ async function currentCodexDetail() {
   };
 }
 
+async function sessionDetail(provider, sessionId) {
+  return provider === "codex" && sessionId === "__current__"
+    ? currentCodexDetail()
+    : getSession(provider, sessionId);
+}
+
+async function watchSession(config, clientId, session) {
+  const watch = {
+    key: session.key,
+    provider: session.provider,
+    sessionId: session.id,
+  };
+  subscriptions.set(clientId, { ...watch, refreshedAt: Date.now() });
+  const client = config.clients[clientId];
+  if (client && (client.watch?.key !== watch.key || client.watch?.sessionId !== watch.sessionId)) {
+    client.watch = watch;
+    await saveConfig(config);
+  }
+}
+
 async function handleCommand(config, clientId, payload) {
   const requestId = payload?.requestId ?? randomToken(8);
   try {
@@ -239,11 +261,9 @@ async function handleCommand(config, clientId, payload) {
       await send(config, clientId, { type: "sessions:snapshot", requestId, sessions: await publicSessions() });
       return;
     }
-    if (payload?.type === "session:get") {
-      const session = payload.provider === "codex" && payload.sessionId === "__current__"
-        ? await currentCodexDetail()
-        : await getSession(payload.provider, payload.sessionId);
-      subscriptions.set(clientId, session.key);
+    if (["session:get", "session:watch"].includes(payload?.type)) {
+      const session = await sessionDetail(payload.provider, payload.sessionId);
+      await watchSession(config, clientId, session);
       await send(config, clientId, { type: "session:snapshot", requestId, session });
       return;
     }
@@ -261,6 +281,7 @@ async function handleCommand(config, clientId, payload) {
       const mode = payload.mode === "full" ? "full" : "safe";
       if (payload.provider === "codex" && payload.sessionId === "__current__") {
         const key = "codex:__current__";
+        await watchSession(config, clientId, { key, provider: "codex", id: "__current__" });
         if (activeRuns.has(key)) throw new Error("正在把上一条指令发送到 Codex");
         const run = sendToCurrentCodex(prompt);
         activeRuns.set(key, run);
@@ -285,6 +306,7 @@ async function handleCommand(config, clientId, payload) {
       }
       const session = await getSession(payload.provider, payload.sessionId);
       const key = `${session.provider}:${session.id}`;
+      await watchSession(config, clientId, session);
       if (activeRuns.has(key)) throw new Error("这个会话仍在执行，请等待或先停止");
       const run = sendPrompt(session, prompt, mode, (event) => {
         void send(config, clientId, {
@@ -433,7 +455,7 @@ async function revokeClient(config, body) {
 }
 
 async function syncExternalChanges(config) {
-  if (Date.now() - lastExternalSyncAt < 2_500) return;
+  if (Date.now() - lastExternalSyncAt < 900) return;
   lastExternalSyncAt = Date.now();
   invalidateSessions();
   const sessions = await publicSessions();
@@ -446,13 +468,13 @@ async function syncExternalChanges(config) {
   );
   await Promise.allSettled(
     clientIds.map(async (clientId) => {
-      const selectedKey = subscriptions.get(clientId);
-      if (!selectedKey) return;
-      const selected = sessions.find((session) => session.key === selectedKey);
-      if (!selected) return;
-      const detail = selected.currentWindow
-        ? await currentCodexDetail()
-        : await getSession(selected.provider, selected.id);
+      const subscription = subscriptions.get(clientId);
+      if (!subscription) return;
+      if (Date.now() - subscription.refreshedAt > SUBSCRIPTION_TTL) {
+        subscriptions.delete(clientId);
+        return;
+      }
+      const detail = await sessionDetail(subscription.provider, subscription.sessionId);
       await send(config, clientId, { type: "session:snapshot", session: detail });
     }),
   );
@@ -460,7 +482,12 @@ async function syncExternalChanges(config) {
 
 async function main() {
   const config = await loadConfig();
-  const relay = normalizeRelay(argument("relay") ?? process.env.RELAYDESK_URL ?? config.relayUrl);
+  for (const [clientId, client] of Object.entries(config.clients)) {
+    if (client.watch?.key && client.watch?.provider && client.watch?.sessionId) {
+      subscriptions.set(clientId, { ...client.watch, refreshedAt: Date.now() });
+    }
+  }
+  const relay = normalizeRelay(argument("relay") ?? process.env.RELAYDESK_URL ?? config.relayUrl ?? DEFAULT_RELAY);
   if (!relay) {
     console.error("请提供中继地址，例如：npm run agent -- --relay https://你的地址");
     process.exitCode = 2;
@@ -494,12 +521,12 @@ async function main() {
   });
   console.log(`电脑控制中心：${CONTROL_URL}`);
 
-  let delay = 1_200;
+  let delay = 700;
   while (true) {
     try {
       await poll(config);
       await syncExternalChanges(config);
-      delay = 1_200;
+      delay = 700;
     } catch (error) {
       console.error(`连接暂时中断：${error instanceof Error ? error.message : error}`);
       delay = Math.min(12_000, Math.round(delay * 1.6));

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relaydesk-remote"
+version = "0.2.0"
+description = "Continue local Codex and Claude Code sessions from your phone"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Neroxsh" }]
+keywords = ["codex", "claude-code", "remote", "mobile"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Homepage = "https://github.com/Neroxsh/RelayDesk"
+Issues = "https://github.com/Neroxsh/RelayDesk/issues"
+
+[project.scripts]
+relaydesk = "agent.cli:main"
+
+[tool.setuptools]
+packages = ["agent"]
+
+[tool.setuptools.package-data]
+agent = ["*.mjs", "*.ps1", "*.html"]
