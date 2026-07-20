@@ -213,6 +213,10 @@ test("the mainland entry runs the RelayDesk API on strongly consistent storage",
   assert.match(proxy, /DEVICE_ONLINE_WINDOW = 120_000/);
   assert.match(proxy, /PRESENCE_WRITE_INTERVAL = 15_000/);
   assert.match(proxy, /refreshAgentPresence\(agent, timestamp\)/);
+  assert.match(proxy, /messages-v2/);
+  assert.match(proxy, /MESSAGE_ID_CEILING - id/);
+  assert.match(proxy, /limit: 100/);
+  assert.match(proxy, /paginate: false/);
   assert.match(proxy, /requestNonce/);
   assert.match(proxy, /path === "\/api\/client\/send"/);
   assert.match(proxy, /path === "\/api\/agent\/import"/);

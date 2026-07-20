@@ -5,6 +5,7 @@ let lastMessageId = 0;
 const pairAttempts = new Map();
 const DEVICE_ONLINE_WINDOW = 120_000;
 const PRESENCE_WRITE_INTERVAL = 15_000;
+const MESSAGE_ID_CEILING = 9_000_000_000_000_000;
 
 const key = {
   device: (id) => `devices/${id}.json`,
@@ -15,6 +16,7 @@ const key = {
   clientToken: (hash) => `client-tokens/${hash}.json`,
   pending: (deviceId, id) => `pending/${deviceId}/${id}.json`,
   messages: (target) => `messages/${target.replace(/[^A-Za-z0-9_-]/g, "_")}/`,
+  recentMessages: (target) => `messages-v2/${target.replace(/[^A-Za-z0-9_-]/g, "_")}/`,
 };
 
 async function getJson(path) {
@@ -161,18 +163,40 @@ async function rateLimit(request) {
 async function addMessage({ deviceId, senderId, targetId, kind = "encrypted", envelope }) {
   const id = nextMessageId();
   const message = { id, device_id: deviceId, sender_id: senderId, kind, envelope, created_at: now() };
-  await putJson(`${key.messages(targetId)}${id}.json`, message);
+  const inverted = String(MESSAGE_ID_CEILING - id).padStart(16, "0");
+  await putJson(`${key.recentMessages(targetId)}${inverted}-${id}.json`, message);
   return id;
 }
 
 async function readMessages(targetId, after) {
-  const prefix = key.messages(targetId);
-  const { blobs = [] } = await db.list({ prefix, consistency: "strong" });
-  const selected = blobs
-    .map((blob) => ({ path: blob.key, id: Number(blob.key.slice(prefix.length).replace(/\.json$/, "")) }))
+  const recentPrefix = key.recentMessages(targetId);
+  const { blobs: recent = [] } = await db.list({
+    prefix: recentPrefix,
+    consistency: "strong",
+    limit: 100,
+    paginate: false,
+  });
+  if (recent.length) {
+    const pending = recent
+      .map((blob) => ({ path: blob.key, id: Number(/-(\d+)\.json$/.exec(blob.key)?.[1]) }))
+      .filter((item) => Number.isFinite(item.id) && item.id > after)
+      .sort((a, b) => a.id - b.id);
+    const selected = after === 0 && pending.length > 20 ? pending.slice(-20) : pending.slice(0, 20);
+    return (await Promise.all(selected.map((item) => getJson(item.path)))).filter(Boolean);
+  }
+
+  const legacyPrefix = key.messages(targetId);
+  const { blobs: legacy = [] } = await db.list({
+    prefix: legacyPrefix,
+    consistency: "strong",
+    limit: 100,
+    paginate: false,
+  });
+  const selected = legacy
+    .map((blob) => ({ path: blob.key, id: Number(blob.key.slice(legacyPrefix.length).replace(/\.json$/, "")) }))
     .filter((item) => Number.isFinite(item.id) && item.id > after)
     .sort((a, b) => a.id - b.id)
-    .slice(0, 100);
+    .slice(0, 20);
   return (await Promise.all(selected.map((item) => getJson(item.path)))).filter(Boolean);
 }
 
