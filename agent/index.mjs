@@ -219,14 +219,28 @@ function claimMutatingRequest(clientId, payload) {
   if (!["session:activate", "session:send", "session:stop"].includes(payload?.type) || !payload?.requestId) return true;
   const current = Date.now();
   if (handledRequests.size > 200) {
-    for (const [key, expiresAt] of handledRequests) {
-      if (expiresAt <= current) handledRequests.delete(key);
+    for (const [key, record] of handledRequests) {
+      if (record.expiresAt <= current) handledRequests.delete(key);
     }
   }
   const key = `${clientId}:${payload.requestId}`;
-  if ((handledRequests.get(key) ?? 0) > current) return false;
-  handledRequests.set(key, current + 10 * 60_000);
-  return true;
+  const existing = handledRequests.get(key);
+  if (existing?.expiresAt > current) return { claimed: false, response: existing.response ?? null };
+  handledRequests.set(key, { expiresAt: current + 10 * 60_000, response: null });
+  return { claimed: true, response: null };
+}
+
+function rememberRequestResponse(clientId, requestId, response) {
+  if (!requestId) return;
+  const key = `${clientId}:${requestId}`;
+  const existing = handledRequests.get(key);
+  if (!existing) return;
+  handledRequests.set(key, { ...existing, response, expiresAt: Date.now() + 10 * 60_000 });
+}
+
+async function sendRequestResponse(config, clientId, requestId, response) {
+  rememberRequestResponse(clientId, requestId, response);
+  return sendBestEffort(config, clientId, response);
 }
 
 async function publicSessions() {
@@ -363,11 +377,11 @@ async function handleCommand(config, clientId, payload) {
         if (activeRuns.has(key)) throw new Error("正在把上一条指令发送到 Codex");
         const run = sendToCurrentCodex(prompt);
         activeRuns.set(key, run);
-        void sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: "window" });
+        void sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: "window" });
         try {
           await run.completed;
         } catch (error) {
-          await sendBestEffort(config, clientId, {
+          await sendRequestResponse(config, clientId, requestId, {
             type: "run:status",
             requestId,
             sessionKey: key,
@@ -379,7 +393,7 @@ async function handleCommand(config, clientId, payload) {
           activeRuns.delete(key);
           invalidateSessions();
         }
-        await sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
+        await sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
         return;
       }
       const session = await getSession(payload.provider, payload.sessionId);
@@ -390,7 +404,7 @@ async function handleCommand(config, clientId, payload) {
         activeCodexSessionId = session.id;
         const run = sendToCodexSession(session.id, prompt);
         activeRuns.set(key, run);
-        void sendBestEffort(config, clientId, {
+        void sendRequestResponse(config, clientId, requestId, {
           type: "run:status",
           requestId,
           sessionKey: key,
@@ -400,14 +414,14 @@ async function handleCommand(config, clientId, payload) {
         try {
           await run.completed;
           invalidateSessions();
-          await sendBestEffort(config, clientId, {
+          await sendRequestResponse(config, clientId, requestId, {
             type: "run:status",
             requestId,
             sessionKey: key,
             status: "submitted",
           });
         } catch (error) {
-          await sendBestEffort(config, clientId, {
+          await sendRequestResponse(config, clientId, requestId, {
             type: "run:status",
             requestId,
             sessionKey: key,
@@ -443,13 +457,13 @@ async function handleCommand(config, clientId, payload) {
         }).catch(() => undefined);
       });
       activeRuns.set(key, run);
-      void sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "running", mode });
+      void sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "running", mode });
       try {
         await run.completed;
         invalidateSessions();
-        await sendBestEffort(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "completed" });
+        await sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "completed" });
       } catch (error) {
-        await sendBestEffort(config, clientId, {
+        await sendRequestResponse(config, clientId, requestId, {
           type: "run:status",
           requestId,
           sessionKey: key,
@@ -474,7 +488,7 @@ async function handleCommand(config, clientId, payload) {
     throw new Error("手机端请求类型不受支持");
   } catch (error) {
     if (isRelayTimeout(error)) return;
-    await sendBestEffort(config, clientId, {
+    await sendRequestResponse(config, clientId, requestId, {
       type: "request:error",
       requestId,
       error: userFacingError(error),
@@ -512,7 +526,11 @@ async function poll(config) {
     try {
       const envelope = JSON.parse(message.envelope);
       const payload = await decryptJson(await clientKey(config, clientId), envelope);
-      if (!claimMutatingRequest(clientId, payload)) continue;
+      const claim = claimMutatingRequest(clientId, payload);
+      if (claim !== true && !claim.claimed) {
+        if (claim.response) void sendBestEffort(config, clientId, claim.response);
+        continue;
+      }
       void handleCommand(config, clientId, payload).catch((error) => {
         console.error(`手机请求处理失败：${error instanceof Error ? error.message : error}`);
       });

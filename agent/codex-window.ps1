@@ -15,6 +15,7 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
+using System.ComponentModel;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class RelayDeskNative {
@@ -27,6 +28,43 @@ public static class RelayDeskNative {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint currentThread, uint targetThread, bool attach);
+  [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct INPUT { public uint type; public InputUnion data; }
+  [StructLayout(LayoutKind.Explicit)]
+  struct InputUnion {
+    [FieldOffset(0)] public MOUSEINPUT mouse;
+    [FieldOffset(0)] public KEYBDINPUT keyboard;
+    [FieldOffset(0)] public HARDWAREINPUT hardware;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct MOUSEINPUT {
+    public int dx; public int dy; public uint mouseData; public uint flags; public uint time; public UIntPtr extraInfo;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct KEYBDINPUT {
+    public ushort virtualKey; public ushort scanCode; public uint flags; public uint time; public UIntPtr extraInfo;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct HARDWAREINPUT { public uint message; public ushort parameterLow; public ushort parameterHigh; }
+
+  public static void SendKeys(ushort[] keys) {
+    INPUT[] inputs = new INPUT[keys.Length * 2];
+    for (int index = 0; index < keys.Length; index++) {
+      inputs[index] = new INPUT {
+        type = 1,
+        data = new InputUnion { keyboard = new KEYBDINPUT { virtualKey = keys[index] } }
+      };
+      int releaseIndex = keys.Length + (keys.Length - index - 1);
+      inputs[releaseIndex] = new INPUT {
+        type = 1,
+        data = new InputUnion { keyboard = new KEYBDINPUT { virtualKey = keys[index], flags = 2 } }
+      };
+    }
+    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+    if (sent != inputs.Length) throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows blocked keyboard input");
+  }
 }
 "@
 
@@ -49,7 +87,8 @@ try {
       "UmVxdWVzdCBjaGFuZ2Vz",
       "57uZIENvZGV4IOWPkeS4gOadoeaMh+S7pOKApg==",
       "57uZIENvZGV4IOWPkeS4gOadoeaMh+S7pC4uLg==",
-      "QXNrIENvZGV4"
+      "QXNrIENvZGV4",
+      "V29yayB3aXRoIENoYXRHUFQ="
     )) { return "" }
     return $text
   }
@@ -63,6 +102,11 @@ try {
       }
     }
     throw $lastError
+  }
+
+  function Send-VirtualKeys([uint16[]]$Keys) {
+    [RelayDeskNative]::SendKeys($Keys)
+    Start-Sleep -Milliseconds 80
   }
 
   $app = Get-Process -Name "ChatGPT" -ErrorAction SilentlyContinue |
@@ -91,6 +135,7 @@ try {
   $document = $null
   $composer = $null
   $blockedByDraft = $false
+  $resumeExistingPrompt = $false
   $busy = $false
   $draftLength = 0
   $deadline = (Get-Date).AddSeconds(120)
@@ -117,9 +162,16 @@ try {
       $existingDraft = Get-ComposerText $composer
       $draftLength = $existingDraft.Length
       if ($existingDraft -and -not $DryRun -and -not $StashDraft) {
-        $blockedByDraft = $true
-        $composer = $null
-        break
+        if ($existingDraft -eq $prompt) {
+          # The previous delivery may have pasted successfully but lost the Enter
+          # keystroke or its acknowledgement. Resume that exact message without
+          # pasting it a second time. Never merge with a different local draft.
+          $resumeExistingPrompt = $true
+        } else {
+          $blockedByDraft = $true
+          $composer = $null
+          break
+        }
       }
     }
     if ($busy -and -not $DryRun -and -not $StashDraft) {
@@ -154,8 +206,8 @@ try {
         Start-Sleep -Milliseconds 180
         $composer.SetFocus()
         Start-Sleep -Milliseconds 100
-        [System.Windows.Forms.SendKeys]::SendWait("^a")
-        [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
+        Send-VirtualKeys @(0x11, 0x41)
+        Send-VirtualKeys @(0x08)
         Start-Sleep -Milliseconds 250
       } finally {
         if ($stashAttached) {
@@ -170,7 +222,7 @@ try {
   }
   if ($DryRun) {
     $bounds = $composer.Current.BoundingRectangle
-    [PSCustomObject]@{ ok = $true; window = "Codex"; composer = "ProseMirror"; width = [int]$bounds.Width; height = [int]$bounds.Height; draftLength = $draftLength; busy = $busy } | ConvertTo-Json -Compress
+    [PSCustomObject]@{ ok = $true; window = "Codex"; composer = "ProseMirror"; width = [int]$bounds.Width; height = [int]$bounds.Height; draftLength = $draftLength; draftMatchesPrompt = ($existingDraft -eq $prompt); busy = $busy } | ConvertTo-Json -Compress
     exit 0
   }
 
@@ -182,6 +234,7 @@ try {
     $attached = [RelayDeskNative]::AttachThreadInput($currentThread, $targetThread, $true)
   }
   $savedClipboard = $null
+  $clipboardTouched = $false
   try {
     [void][RelayDeskNative]::ShowWindowAsync($app.MainWindowHandle, 9)
     [void][RelayDeskNative]::BringWindowToTop($app.MainWindowHandle)
@@ -189,20 +242,23 @@ try {
     Start-Sleep -Milliseconds 180
     $composer.SetFocus()
     Start-Sleep -Milliseconds 100
-    $savedClipboard = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetDataObject() }
-    Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($prompt) } | Out-Null
-    [System.Windows.Forms.SendKeys]::SendWait("^v")
-    Start-Sleep -Milliseconds 180
+    if (-not $resumeExistingPrompt) {
+      $savedClipboard = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetDataObject() }
+      Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($prompt) } | Out-Null
+      $clipboardTouched = $true
+      Send-VirtualKeys @(0x11, 0x56)
+      Start-Sleep -Milliseconds 180
+    }
     if ($ValidatePaste) {
       $visibleText = Get-ComposerText $composer
       if (-not $visibleText.Contains($prompt)) { throw "Codex did not receive the pasted text" }
-      [System.Windows.Forms.SendKeys]::SendWait("^a")
-      [System.Windows.Forms.SendKeys]::SendWait("{BACKSPACE}")
+      Send-VirtualKeys @(0x11, 0x41)
+      Send-VirtualKeys @(0x08)
     } else {
       # A UI Automation Invoke can start a task without updating Codex's visible
       # conversation state. Submit through the focused composer just like a user.
       $composer.SetFocus()
-      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+      Send-VirtualKeys @(0x0D)
       Start-Sleep -Milliseconds 500
       # Codex replaces the composer element as soon as a message is accepted. A stale
       # automation element here means the submit succeeded, not that the request failed.
@@ -211,18 +267,20 @@ try {
     }
     Start-Sleep -Milliseconds 160
   } finally {
-    try {
-      if ($null -ne $savedClipboard) {
-        Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true) } | Out-Null
-      } else {
-        Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::Clear() } | Out-Null
-      }
-    } catch { }
+    if ($clipboardTouched) {
+      try {
+        if ($null -ne $savedClipboard) {
+          Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true) } | Out-Null
+        } else {
+          Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::Clear() } | Out-Null
+        }
+      } catch { }
+    }
     if ($attached) {
       [void][RelayDeskNative]::AttachThreadInput($currentThread, $targetThread, $false)
     }
   }
-  [PSCustomObject]@{ ok = $true; window = "Codex"; pasteValidated = [bool]$ValidatePaste } | ConvertTo-Json -Compress
+  [PSCustomObject]@{ ok = $true; window = "Codex"; pasteValidated = [bool]$ValidatePaste; resumedExistingPrompt = $resumeExistingPrompt } | ConvertTo-Json -Compress
 } catch {
   [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
   exit 1

@@ -51,6 +51,7 @@ export default function Home() {
   const detailsRef = useRef<Record<string, SessionDetail>>({});
   const optimisticRef = useRef(new Map<string, { sessionKey: string; messageId: string }>());
   const waitingForReplyRef = useRef(new Map<string, string | null>());
+  const deliveryAcksRef = useRef(new Map<string, () => void>());
   const messageEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -107,6 +108,8 @@ export default function Home() {
     const envelope = await encryptJson(keyRef.current, payload);
     let lastError = "中继暂时不稳定";
     for (let attempt = 0; attempt < 4; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 6_000);
       try {
         const response = await fetch("/api/client/send", {
           method: "POST",
@@ -116,13 +119,18 @@ export default function Home() {
             "x-relaydesk-client-id": current.clientId,
           },
           body: JSON.stringify({ envelope }),
+          signal: controller.signal,
         });
         const data = await response.json().catch(() => ({})) as { error?: string };
         if (response.ok) return;
         lastError = data.error ?? lastError;
         if (response.status < 500 && response.status !== 429) throw new Error(lastError);
       } catch (error) {
-        lastError = error instanceof Error ? error.message : lastError;
+        lastError = controller.signal.aborted
+          ? "连接超时"
+          : error instanceof Error ? error.message : lastError;
+      } finally {
+        window.clearTimeout(timeout);
       }
       if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
     }
@@ -210,6 +218,7 @@ export default function Home() {
     if (payload.type === "run:status" && payload.sessionKey) {
       const key = payload.sessionKey as string;
       const status = String(payload.status ?? "");
+      if (payload.requestId) deliveryAcksRef.current.get(payload.requestId)?.();
       setRunning((value) => {
         const next = { ...value };
         if (["completed", "failed"].includes(status)) delete next[key];
@@ -228,6 +237,7 @@ export default function Home() {
     }
 
     if (payload.type === "request:error") {
+      if (payload.requestId) deliveryAcksRef.current.get(payload.requestId)?.();
       rollbackOptimistic(payload.requestId);
       setToast(String(payload.error ?? "请求失败"));
       setRunning({});
@@ -368,6 +378,17 @@ export default function Home() {
     const prompt = draft.trim();
     const remoteRequestId = requestId();
     const optimisticId = `local-${remoteRequestId}`;
+    const remotePayload: RemotePayload = {
+      type: "session:send",
+      provider: selectedSummary.provider,
+      sessionId: selectedSummary.id,
+      prompt,
+      mode,
+      requestId: remoteRequestId,
+    };
+    const deliveryAcknowledged = new Promise<boolean>((resolve) => {
+      deliveryAcksRef.current.set(remoteRequestId, () => resolve(true));
+    });
     const latestAssistant = [...messages].reverse().find((message) => message.role === "assistant");
     waitingForReplyRef.current.set(selectedSummary.key, latestAssistant ? messageSignature(latestAssistant) : null);
     setSending(true);
@@ -379,14 +400,16 @@ export default function Home() {
     }));
     optimisticRef.current.set(remoteRequestId, { sessionKey: selectedSummary.key, messageId: optimisticId });
     try {
-      await remoteSend({
-        type: "session:send",
-        provider: selectedSummary.provider,
-        sessionId: selectedSummary.id,
-        prompt,
-        mode,
-        requestId: remoteRequestId,
-      });
+      let acknowledged = false;
+      for (let deliveryAttempt = 0; deliveryAttempt < 3 && !acknowledged; deliveryAttempt += 1) {
+        await remoteSend(remotePayload);
+        setSending(false);
+        acknowledged = await Promise.race([
+          deliveryAcknowledged,
+          new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), 12_000)),
+        ]);
+      }
+      if (!acknowledged) throw new Error("电脑没有确认收到，请重新发送");
     } catch (error) {
       const optimistic = optimisticRef.current.get(remoteRequestId);
       if (optimistic) {
@@ -404,6 +427,7 @@ export default function Home() {
       });
       setToast(error instanceof Error ? error.message : "发送失败");
     } finally {
+      deliveryAcksRef.current.delete(remoteRequestId);
       setSending(false);
     }
   }

@@ -140,6 +140,9 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(page, /visibleDevice/);
   assert.match(page, /mergeSessionMessages/);
   assert.match(page, /attempt < 4/);
+  assert.match(page, /controller\.abort\(\)/);
+  assert.match(page, /deliveryAcksRef/);
+  assert.match(page, /deliveryAttempt < 3/);
   assert.doesNotMatch(page, /consecutivePollFailures/);
   assert.match(meta, /export function mergeSessionMessages/);
   assert.match(page, /visibilitychange/);
@@ -169,6 +172,8 @@ test("the agent persists and renews a selected-session subscription", async () =
   assert.match(agent, /stableSessionSnapshot/);
   assert.match(agent, /sendBestEffort/);
   assert.match(agent, /claimMutatingRequest/);
+  assert.match(agent, /rememberRequestResponse/);
+  assert.match(agent, /if \(claim\.response\) void sendBestEffort/);
   assert.match(agent, /sendToCodexSession/);
   assert.match(agent, /activeCodexSessionId/);
   assert.match(agent, /sessionDiagnostics/);
@@ -196,7 +201,9 @@ test("current-window injection is restricted to the Codex composer", async () =>
   assert.match(script, /Current\.Name -eq "Codex"/);
   assert.match(script, /Current\.ClassName -like "ProseMirror\*"/);
   assert.match(script, /unsent text in its composer/);
-  assert.match(script, /SendWait\("\{ENTER\}"\)/);
+  assert.match(script, /Send-VirtualKeys @\(0x0D\)/);
+  assert.match(script, /V29yayB3aXRoIENoYXRHUFQ=/);
+  assert.match(script, /resumeExistingPrompt/);
   assert.match(script, /OutputEncoding/);
   assert.match(script, /AllowUnavailable/);
   assert.doesNotMatch(script, /InvokePattern/);

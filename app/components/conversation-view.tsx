@@ -55,6 +55,13 @@ export function ConversationView({
   const transcriptWorking = detail?.state === "working";
   const isWorking = Boolean(runningStatus) || transcriptWorking;
   const waiting = runningStatus === "waiting";
+  const deliveryCopy = runningStatus === "sending"
+    ? "正在发送到电脑"
+    : runningStatus === "running"
+      ? "已送达，正在启动"
+      : waiting
+        ? `${providerName(session.provider)} 正在思考`
+        : "正在继续回复";
   // The current Codex window accepts a queued instruction while its existing task is
   // running. Historical CLI sessions still need to finish before another run starts.
   const submitLocked = sending || Boolean(runningStatus) || (!session.currentWindow && transcriptWorking);
@@ -104,7 +111,7 @@ export function ConversationView({
           <div className="reply-pulse" role="status" aria-live="polite">
             <span className={`provider-dot ${session.provider}`} />
             <span className="reply-pulse-dots" aria-hidden="true"><i /><i /><i /></span>
-            <p>{waiting ? `${providerName(session.provider)} 正在思考` : "正在继续回复"}</p>
+            <p>{deliveryCopy}</p>
           </div>
         ) : null}
         <div ref={messageEndRef} className="message-end" />
