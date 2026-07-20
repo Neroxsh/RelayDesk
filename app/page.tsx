@@ -30,6 +30,8 @@ export default function Home() {
   const [pairing, setPairing] = useState<StoredPairing | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [device, setDevice] = useState<DeviceStatus | null>(null);
+  const [agentContactAt, setAgentContactAt] = useState(0);
+  const [clock, setClock] = useState(() => Date.now());
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [details, setDetails] = useState<Record<string, SessionDetail>>({});
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -85,6 +87,11 @@ export default function Home() {
       clearTimeout(timer);
       navigator.serviceWorker?.removeEventListener("controllerchange", refreshForUpdate);
     };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 10_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -257,7 +264,10 @@ export default function Home() {
           cursorRef.current = Math.max(cursorRef.current, Number(message.id) || 0);
           if (message.kind !== "encrypted") continue;
           const payload = await decryptJson(keyRef.current, JSON.parse(message.envelope)) as RemotePayload;
-          if (!stopped) handlePayload(payload);
+          if (!stopped) {
+            setAgentContactAt(Date.now());
+            handlePayload(payload);
+          }
         }
         localStorage.setItem(cursorKey(pairing.clientId), String(cursorRef.current));
         if (!stopped) timer = setTimeout(poll, document.visibilityState === "visible" ? 700 : 2_500);
@@ -268,16 +278,26 @@ export default function Home() {
       }
     };
     void remoteSend({ type: "sessions:list", requestId: requestId() }).catch(() => undefined);
+    void remoteSend({ type: "ping", requestId: requestId() }).catch(() => undefined);
     const sessionTimer = setInterval(() => {
       if (document.visibilityState === "visible") {
         void remoteSend({ type: "sessions:list", requestId: requestId() }).catch(() => undefined);
       }
     }, 30_000);
+    const pingTimer = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void remoteSend({ type: "ping", requestId: requestId() }).catch(() => undefined);
+      }
+    }, 15_000);
     void poll();
-    return () => { stopped = true; clearTimeout(timer); clearInterval(sessionTimer); };
+    return () => { stopped = true; clearTimeout(timer); clearInterval(sessionTimer); clearInterval(pingTimer); };
   }, [pairing, handlePayload, remoteSend]);
 
   const currentWindow = sessions.find((session) => session.currentWindow);
+  const visibleDevice = useMemo<DeviceStatus | null>(() => device ? {
+    ...device,
+    online: device.online || (agentContactAt > 0 && clock - agentContactAt < 60_000),
+  } : null, [device, agentContactAt, clock]);
   const selectedSummary = sessions.find((session) => session.key === selectedKey) ?? null;
   const selectedSessionId = selectedSummary?.id;
   const selectedProvider = selectedSummary?.provider;
@@ -436,7 +456,7 @@ export default function Home() {
       <SessionBrowser
         activeProvider={activeProvider}
         providerCounts={providerCounts}
-        device={device}
+        device={visibleDevice}
         pairing={pairing}
         currentWindow={currentWindow}
         selectedKey={selectedKey}
@@ -457,7 +477,7 @@ export default function Home() {
           session={selectedSummary}
           detail={selectedDetail}
           messages={messages}
-          device={device}
+          device={visibleDevice}
           runningStatus={running[selectedSummary.key]}
           draft={draft}
           mode={mode}

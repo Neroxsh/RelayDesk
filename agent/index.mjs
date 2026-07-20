@@ -678,13 +678,21 @@ async function main() {
   const heartbeat = async () => {
     if (heartbeatInFlight) return;
     heartbeatInFlight = true;
+    let lastError;
     try {
-      await request(config, "/api/agent/heartbeat", {
-        method: "POST",
-        signal: AbortSignal.timeout(20_000),
-      });
-    } catch (error) {
-      console.error(`心跳更新失败：${error instanceof Error ? error.message : error}`);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await request(config, "/api/agent/heartbeat", {
+            method: "POST",
+            signal: AbortSignal.timeout(12_000),
+          });
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (2 ** attempt)));
+        }
+      }
+      console.error(`心跳更新失败：${lastError instanceof Error ? lastError.message : lastError}`);
     } finally {
       heartbeatInFlight = false;
     }

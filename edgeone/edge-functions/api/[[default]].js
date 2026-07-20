@@ -3,7 +3,8 @@ import { getStore } from "@edgeone/pages-blob";
 const db = getStore({ name: "relaydesk", consistency: "strong" });
 let lastMessageId = 0;
 const pairAttempts = new Map();
-const DEVICE_ONLINE_WINDOW = 60_000;
+const DEVICE_ONLINE_WINDOW = 120_000;
+const PRESENCE_WRITE_INTERVAL = 15_000;
 
 const key = {
   device: (id) => `devices/${id}.json`,
@@ -131,6 +132,15 @@ async function authenticateClient(request) {
   if (!index?.clientId) return null;
   const client = await getJson(key.client(index.clientId));
   return client && !client.revokedAt && client.tokenHash === tokenHash ? client : null;
+}
+
+async function refreshAgentPresence(agent, timestamp = now()) {
+  if (!agent?.id || timestamp - Number(agent.lastSeenAt || 0) < PRESENCE_WRITE_INTERVAL) return;
+  try {
+    await putJson(key.device(agent.id), { ...agent, lastSeenAt: timestamp });
+  } catch {
+    // Presence is best effort. A temporary blob write failure must not break polling.
+  }
 }
 
 async function rateLimit(request) {
@@ -324,10 +334,12 @@ async function rejectPair(request) {
 async function pollAgent(request) {
   const agent = await authenticateAgent(request);
   if (!agent) return jsonError("设备认证失败", 401);
+  const timestamp = now();
   const after = Math.max(0, Number.parseInt(new URL(request.url).searchParams.get("after") || "0", 10) || 0);
   const [messages, pairRequests] = await Promise.all([
     readMessages(`agent:${agent.id}`, after),
     readPairRequests(agent.id, after),
+    refreshAgentPresence(agent, timestamp),
   ]);
   messages.push(...pairRequests);
   messages.sort((a, b) => a.id - b.id);
@@ -358,6 +370,7 @@ async function pollClient(request) {
 async function sendFromAgent(request) {
   const agent = await authenticateAgent(request);
   if (!agent) return jsonError("设备认证失败", 401);
+  await refreshAgentPresence(agent);
   const body = await readJson(request);
   if (!validId(body.clientId)) return jsonError("手机设备无效");
   const encoded = JSON.stringify(body.envelope);

@@ -21,7 +21,7 @@ export async function GET(request: Request) {
     messages: rows.results ?? [],
     cursor: rows.results?.at(-1)?.id ?? after,
     device: device
-      ? { name: device.name, platform: device.platform, online: timestamp - device.last_seen_at < 15_000, lastSeenAt: device.last_seen_at }
+      ? { name: device.name, platform: device.platform, online: timestamp - device.last_seen_at < 120_000, lastSeenAt: device.last_seen_at }
       : null,
   });
 }
