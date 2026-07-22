@@ -36,11 +36,17 @@ function resetText(timestamp: number) {
   return `重置于 ${new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date)}`;
 }
 
+function compactNumber(value: number) {
+  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
 export function CodexSettings({ status, settings, currentWindow, customized, onChange, onClose, onRefresh, onUseDesktopSettings }: CodexSettingsProps) {
   const models = status?.models ?? [];
   const selectedModel = models.find((model) => model.model === settings.model) ?? models.find((model) => model.isDefault) ?? models[0];
   const efforts = selectedModel?.supportedReasoningEfforts ?? [];
   const primary = status?.usage.primary;
+  const activity = status?.usage.activity;
+  const today = activity?.daily.at(-1);
   const remaining = Math.max(0, Math.round(100 - (primary?.usedPercent ?? 0)));
   const serviceTier = selectedModel?.serviceTiers?.[0];
 
@@ -69,6 +75,14 @@ export function CodexSettings({ status, settings, currentWindow, customized, onC
             <i><em style={{ width: `${remaining}%` }} /></i>
             <ChevronRight size={16} />
           </button>
+        ) : null}
+
+        {activity ? (
+          <div className="usage-summary" aria-label="Codex 使用统计">
+            <span><small>今日</small><strong>{today ? compactNumber(today.tokens) : "0"}</strong><i>tokens</i></span>
+            <span><small>累计</small><strong>{compactNumber(activity.lifetimeTokens)}</strong><i>tokens</i></span>
+            <span><small>连续使用</small><strong>{activity.currentStreakDays}</strong><i>天</i></span>
+          </div>
         ) : null}
 
         {currentWindow ? <p className="settings-notice">当前窗口沿用电脑端已选择的模型和权限；以下设置用于项目会话。</p> : (

@@ -103,10 +103,11 @@ export async function getCodexStatus(force = false) {
   const client = createClient();
   try {
     await client.initialize();
-    const [modelResponse, accountResponse, limitsResponse] = await Promise.all([
+    const [modelResponse, accountResponse, limitsResponse, usageResponse] = await Promise.all([
       client.request("model/list", { includeHidden: false, limit: 100 }),
       client.request("account/read", { refreshToken: false }),
       client.request("account/rateLimits/read", null),
+      client.request("account/usage/read", null).catch(() => null),
     ]);
     const models = (modelResponse?.data ?? modelResponse?.models ?? [])
       .filter((model) => !model.hidden)
@@ -128,6 +129,19 @@ export async function getCodexStatus(force = false) {
           hasCredits: Boolean(limits.credits.hasCredits),
           unlimited: Boolean(limits.credits.unlimited),
           balance: limits.credits.balance ?? null,
+        } : null,
+        activity: usageResponse?.summary ? {
+          lifetimeTokens: Number(usageResponse.summary.lifetimeTokens ?? 0),
+          peakDailyTokens: Number(usageResponse.summary.peakDailyTokens ?? 0),
+          longestRunningTurnSec: Number(usageResponse.summary.longestRunningTurnSec ?? 0),
+          currentStreakDays: Number(usageResponse.summary.currentStreakDays ?? 0),
+          longestStreakDays: Number(usageResponse.summary.longestStreakDays ?? 0),
+          daily: Array.isArray(usageResponse.dailyUsageBuckets)
+            ? usageResponse.dailyUsageBuckets.slice(-14).map((item) => ({
+                startDate: String(item.startDate ?? ""),
+                tokens: Number(item.tokens ?? 0),
+              }))
+            : [],
         } : null,
       },
       platform: {

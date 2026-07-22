@@ -28,6 +28,14 @@ export type CodexStatus = {
     primary: RateLimitWindow | null;
     secondary: RateLimitWindow | null;
     credits: { hasCredits: boolean; unlimited: boolean; balance: string | null } | null;
+    activity: {
+      lifetimeTokens: number;
+      peakDailyTokens: number;
+      longestRunningTurnSec: number;
+      currentStreakDays: number;
+      longestStreakDays: number;
+      daily: Array<{ startDate: string; tokens: number }>;
+    } | null;
   };
   platform: { os: string; release: string; arch: string };
   updatedAt: number;
