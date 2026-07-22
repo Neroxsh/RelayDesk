@@ -36,6 +36,18 @@ for (const entry of Object.values(builtManifest)) {
   );
 }
 
+// The saved EdgeOne shell may come from an older deployment. Keep its
+// metadata aligned with the current Codex-only product before publishing.
+html = html
+  .replaceAll(
+    "RelayDesk — Codex 与 Claude Code 远程工作台",
+    "RelayDesk — 随时继续 Codex",
+  )
+  .replaceAll(
+    "从手机继续电脑上的 Codex 与 Claude Code 会话。",
+    "从手机继续电脑上的 Codex 会话。",
+  );
+
 const builtAssets = await readdir(path.join(client, "assets"));
 for (const cssFile of builtAssets.filter((file) => file.endsWith(".css"))) {
   const stem = cssFile.replace(/-[A-Za-z0-9_-]+\.css$/, "");
