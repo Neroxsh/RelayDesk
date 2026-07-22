@@ -10,12 +10,11 @@ import {
   ChevronDown,
   CircleStop,
   LoaderCircle,
-  ShieldCheck,
+  SlidersHorizontal,
   Terminal,
-  Zap,
 } from "lucide-react";
-import { formatMessageTime, PROVIDERS, providerName } from "../relaydesk-meta";
-import type { DeviceStatus, Message, PermissionMode, SessionDetail, SessionSummary } from "../relaydesk-types";
+import { formatMessageTime, providerName } from "../relaydesk-meta";
+import type { DeviceStatus, Message, RunSettings, SessionDetail, SessionSummary } from "../relaydesk-types";
 
 type ConversationViewProps = {
   session: SessionSummary;
@@ -24,12 +23,14 @@ type ConversationViewProps = {
   device: DeviceStatus | null;
   runningStatus?: string;
   draft: string;
-  mode: PermissionMode;
+  settings: RunSettings;
+  modelName: string;
+  managedSettings: boolean;
   sending: boolean;
   messageEndRef: RefObject<HTMLDivElement | null>;
   onBack: () => void;
   onDraftChange: (value: string) => void;
-  onModeChange: (mode: PermissionMode) => void;
+  onOpenSettings: () => void;
   onSubmit: (event?: FormEvent) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onStop: () => void;
@@ -42,12 +43,14 @@ export function ConversationView({
   device,
   runningStatus,
   draft,
-  mode,
+  settings,
+  modelName,
+  managedSettings,
   sending,
   messageEndRef,
   onBack,
   onDraftChange,
-  onModeChange,
+  onOpenSettings,
   onSubmit,
   onKeyDown,
   onStop,
@@ -119,14 +122,10 @@ export function ConversationView({
 
       <form className="composer" onSubmit={onSubmit}>
         <div className="composer-meta">
-          {session.currentWindow ? (
-            <span className="target-label"><Terminal size={14} />电脑当前窗口</span>
-          ) : (
-            <div className="mode-switch" aria-label="执行权限">
-              <button type="button" className={mode === "safe" ? "active" : ""} onClick={() => onModeChange("safe")}><ShieldCheck size={14} />需确认</button>
-              <button type="button" className={mode === "full" ? "active warning" : ""} onClick={() => onModeChange("full")}><Zap size={14} />自动执行</button>
-            </div>
-          )}
+          <button className="run-settings-button" type="button" onClick={onOpenSettings}>
+            {session.currentWindow ? <Terminal size={14} /> : <SlidersHorizontal size={14} />}
+            <span>{session.currentWindow || !managedSettings ? "电脑端设置" : `${modelName} · ${settings.permission === "read-only" ? "只读" : settings.permission === "full" ? "完全访问" : "工作区"}`}</span>
+          </button>
           <span className="sync-copy">{
             session.currentWindow && runningStatus
               ? "正在送达电脑"
@@ -149,7 +148,7 @@ export function ConversationView({
 export function EmptyConversation({ provider }: { provider: SessionSummary["provider"] }) {
   return (
     <section className="conversation-panel empty">
-      <div className="conversation-empty"><span className={`provider-dot ${provider}`} /><h2>{PROVIDERS[provider].name}</h2><p>选择一个会话继续。</p></div>
+      <div className="conversation-empty"><span className={`provider-dot ${provider}`} /><h2>Codex</h2><p>选择一个会话继续。</p></div>
     </section>
   );
 }

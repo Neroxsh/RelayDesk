@@ -2,8 +2,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$PromptBase64,
   [switch]$DryRun,
-  [switch]$ValidatePaste,
-  [switch]$StashDraft
+  [switch]$ValidatePaste
 )
 
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -134,8 +133,6 @@ try {
   $root = [System.Windows.Automation.AutomationElement]::FromHandle($automationHandle)
   $document = $null
   $composer = $null
-  $blockedByDraft = $false
-  $resumeExistingPrompt = $false
   $busy = $false
   $draftLength = 0
   $deadline = (Get-Date).AddSeconds(120)
@@ -161,20 +158,8 @@ try {
     if ($composer) {
       $existingDraft = Get-ComposerText $composer
       $draftLength = $existingDraft.Length
-      if ($existingDraft -and -not $DryRun -and -not $StashDraft) {
-        if ($existingDraft -eq $prompt) {
-          # The previous delivery may have pasted successfully but lost the Enter
-          # keystroke or its acknowledgement. Resume that exact message without
-          # pasting it a second time. Never merge with a different local draft.
-          $resumeExistingPrompt = $true
-        } else {
-          $blockedByDraft = $true
-          $composer = $null
-          break
-        }
-      }
     }
-    if ($busy -and -not $DryRun -and -not $StashDraft) {
+    if ($busy -and -not $DryRun) {
       $composer = $null
     }
     if ($document -and $composer) { break }
@@ -182,47 +167,11 @@ try {
   } while ((Get-Date) -lt $deadline)
   if (-not $document) { throw "The current window is not Codex" }
   if (-not $composer) {
-    if ($blockedByDraft) { throw "Codex has unsent text in its composer; the remote message was not mixed into it" }
     throw "Codex is still busy and its composer is unavailable"
-  }
-  if ($StashDraft) {
-    $backupPath = $null
-    if ($existingDraft) {
-      $backupDirectory = Join-Path $env:USERPROFILE ".relaydesk\draft-backups"
-      [void](New-Item -ItemType Directory -Path $backupDirectory -Force)
-      $backupPath = Join-Path $backupDirectory ("codex-draft-{0}.txt" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-      [IO.File]::WriteAllText($backupPath, $existingDraft, (New-Object Text.UTF8Encoding($false)))
-      [uint32]$stashTargetProcess = 0
-      $stashTargetThread = [RelayDeskNative]::GetWindowThreadProcessId($app.MainWindowHandle, [ref]$stashTargetProcess)
-      $stashCurrentThread = [RelayDeskNative]::GetCurrentThreadId()
-      $stashAttached = $false
-      try {
-        if ($stashTargetThread -ne 0 -and $stashTargetThread -ne $stashCurrentThread) {
-          $stashAttached = [RelayDeskNative]::AttachThreadInput($stashCurrentThread, $stashTargetThread, $true)
-        }
-        [void][RelayDeskNative]::ShowWindowAsync($app.MainWindowHandle, 9)
-        [void][RelayDeskNative]::BringWindowToTop($app.MainWindowHandle)
-        [void][RelayDeskNative]::SetForegroundWindow($app.MainWindowHandle)
-        Start-Sleep -Milliseconds 180
-        $composer.SetFocus()
-        Start-Sleep -Milliseconds 100
-        Send-VirtualKeys @(0x11, 0x41)
-        Send-VirtualKeys @(0x08)
-        Start-Sleep -Milliseconds 250
-      } finally {
-        if ($stashAttached) {
-          [void][RelayDeskNative]::AttachThreadInput($stashCurrentThread, $stashTargetThread, $false)
-        }
-      }
-      $remainingDraft = Get-ComposerText $composer
-      if ($remainingDraft) { throw "Codex draft was backed up but could not be cleared" }
-    }
-    [PSCustomObject]@{ ok = $true; stashed = [bool]$existingDraft; path = $backupPath } | ConvertTo-Json -Compress
-    exit 0
   }
   if ($DryRun) {
     $bounds = $composer.Current.BoundingRectangle
-    [PSCustomObject]@{ ok = $true; window = "Codex"; composer = "ProseMirror"; width = [int]$bounds.Width; height = [int]$bounds.Height; draftLength = $draftLength; draftMatchesPrompt = ($existingDraft -eq $prompt); busy = $busy } | ConvertTo-Json -Compress
+    [PSCustomObject]@{ ok = $true; window = "Codex"; composer = "ProseMirror"; width = [int]$bounds.Width; height = [int]$bounds.Height; draftLength = $draftLength; busy = $busy } | ConvertTo-Json -Compress
     exit 0
   }
 
@@ -242,13 +191,17 @@ try {
     Start-Sleep -Milliseconds 180
     $composer.SetFocus()
     Start-Sleep -Milliseconds 100
-    if (-not $resumeExistingPrompt) {
-      $savedClipboard = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetDataObject() }
-      Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($prompt) } | Out-Null
-      $clipboardTouched = $true
-      Send-VirtualKeys @(0x11, 0x56)
-      Start-Sleep -Milliseconds 180
-    }
+    # Remote input always replaces any unsent local draft. Do not try to classify,
+    # back up, or validate the old text because UI Automation can expose placeholder
+    # copy as document text even when the composer is visually empty.
+    Send-VirtualKeys @(0x11, 0x41)
+    Send-VirtualKeys @(0x08)
+    Start-Sleep -Milliseconds 120
+    $savedClipboard = Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::GetDataObject() }
+    Invoke-ClipboardRetry { [System.Windows.Forms.Clipboard]::SetText($prompt) } | Out-Null
+    $clipboardTouched = $true
+    Send-VirtualKeys @(0x11, 0x56)
+    Start-Sleep -Milliseconds 180
     if ($ValidatePaste) {
       $visibleText = Get-ComposerText $composer
       if (-not $visibleText.Contains($prompt)) { throw "Codex did not receive the pasted text" }
@@ -280,7 +233,7 @@ try {
       [void][RelayDeskNative]::AttachThreadInput($currentThread, $targetThread, $false)
     }
   }
-  [PSCustomObject]@{ ok = $true; window = "Codex"; pasteValidated = [bool]$ValidatePaste; resumedExistingPrompt = $resumeExistingPrompt } | ConvertTo-Json -Compress
+  [PSCustomObject]@{ ok = $true; window = "Codex"; pasteValidated = [bool]$ValidatePaste; draftCleared = $true } | ConvertTo-Json -Compress
 } catch {
   [PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
   exit 1

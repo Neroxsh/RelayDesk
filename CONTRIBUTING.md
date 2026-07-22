@@ -5,8 +5,8 @@
 ## 开发环境
 
 - Node.js 22.13 或更高版本
-- Windows 11（电脑端桥接的主要测试平台）
-- 已登录的 Codex 或 Claude Code（仅真实会话测试需要）
+- Windows 10、Windows 11 或 macOS
+- 已登录的 Codex（仅真实会话测试需要）
 
 ```powershell
 npm install

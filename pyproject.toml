@@ -4,17 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "relaydesk-remote"
-version = "0.2.0"
-description = "Continue local Codex and Claude Code sessions from your phone"
+version = "0.3.0"
+description = "Control local Codex sessions from your phone"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Neroxsh" }]
-keywords = ["codex", "claude-code", "remote", "mobile"]
+keywords = ["codex", "remote", "mobile"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3",
   "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
 ]
 
 [project.urls]

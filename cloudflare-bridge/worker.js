@@ -1,7 +1,7 @@
 const EDGEONE_ORIGIN = "https://relaydesk-direct-lx7qr5rj.edgeone.dev";
 const TRANSIENT_ORIGIN_STATUS = new Set([520, 522, 523, 524, 525, 526, 545]);
 
-export default {
+const relayBridge = {
   async fetch(request) {
     const target = new URL(request.url);
     const origin = new URL(EDGEONE_ORIGIN);
@@ -21,3 +21,5 @@ export default {
     return response;
   },
 };
+
+export default relayBridge;

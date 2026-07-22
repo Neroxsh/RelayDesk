@@ -12,6 +12,7 @@ import {
   sessionDiagnostics,
 } from "./sessions.mjs";
 import { openCodexSession, sendPrompt, sendToCodexSession, sendToCurrentCodex } from "./providers.mjs";
+import { getCodexStatus } from "./codex-status.mjs";
 import { CONTROL_URL, openControlPanel, startControlServer } from "./control-server.mjs";
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
@@ -88,7 +89,8 @@ async function request(config, pathname, options = {}) {
     "x-relaydesk-device-id": config.deviceId,
     ...(options.headers ?? {}),
   };
-  const { auth: _auth, ...fetchOptions } = options;
+  const fetchOptions = { ...options };
+  delete fetchOptions.auth;
   const response = await fetch(`${config.relayUrl}${pathname}`, {
     ...fetchOptions,
     headers,
@@ -290,10 +292,24 @@ async function currentCodexDetail() {
 }
 
 async function sessionDetail(provider, sessionId) {
+  if (provider !== "codex") throw new Error("当前版本仅支持 Codex");
   const session = await (provider === "codex" && sessionId === "__current__"
     ? currentCodexDetail()
     : getSession(provider, sessionId));
   return stableSessionSnapshot(session);
+}
+
+function runSettings(payload) {
+  const source = payload?.settings && typeof payload.settings === "object" ? payload.settings : {};
+  const permission = ["read-only", "workspace", "full"].includes(source.permission)
+    ? source.permission
+    : payload?.mode === "full" ? "full" : "workspace";
+  return {
+    permission,
+    model: typeof source.model === "string" ? source.model : "",
+    reasoning: typeof source.reasoning === "string" ? source.reasoning : "",
+    serviceTier: typeof source.serviceTier === "string" ? source.serviceTier : "",
+  };
 }
 
 async function watchSession(config, clientId, session) {
@@ -331,8 +347,21 @@ async function handleCommand(config, clientId, payload) {
       await send(config, clientId, { type: "pong", requestId, at: Date.now() });
       return;
     }
+    if (payload?.type === "codex:status:get") {
+      const status = await getCodexStatus(Boolean(payload.refresh));
+      await send(config, clientId, { type: "codex:status", requestId, status });
+      return;
+    }
     if (payload?.type === "sessions:list") {
-      await send(config, clientId, { type: "sessions:snapshot", requestId, sessions: await publicSessions() });
+      await sendBestEffort(config, clientId, { type: "sessions:loading", requestId, progress: 12, label: "正在读取 Codex 会话" });
+      const sessions = await publicSessions();
+      await sendBestEffort(config, clientId, { type: "sessions:loading", requestId, progress: 86, label: "正在整理项目" });
+      await send(config, clientId, { type: "sessions:snapshot", requestId, sessions });
+      void getCodexStatus().then((status) => sendBestEffort(config, clientId, {
+        type: "codex:status",
+        requestId,
+        status,
+      })).catch(() => undefined);
       return;
     }
     if (["session:get", "session:watch"].includes(payload?.type)) {
@@ -370,14 +399,28 @@ async function handleCommand(config, clientId, payload) {
     if (payload?.type === "session:send") {
       const prompt = String(payload.prompt ?? "").trim();
       if (!prompt || prompt.length > 12_000) throw new Error("指令需为 1–12000 个字符");
-      const mode = payload.mode === "full" ? "full" : "safe";
+      if (payload.provider !== "codex") throw new Error("当前版本仅支持 Codex");
+      const settings = runSettings(payload);
       if (payload.provider === "codex" && payload.sessionId === "__current__") {
         const key = "codex:__current__";
         await watchSession(config, clientId, { key, provider: "codex", id: "__current__" });
         if (activeRuns.has(key)) throw new Error("正在把上一条指令发送到 Codex");
-        const run = sendToCurrentCodex(prompt);
+        const current = process.platform === "win32" ? null : await currentCodexDetail();
+        const source = current?.sourceSessionId ? await getSession("codex", current.sourceSessionId) : null;
+        if (process.platform !== "win32" && !source) throw new Error("还没有可继续的 Codex 会话");
+        const run = process.platform === "win32"
+          ? sendToCurrentCodex(prompt)
+          : sendPrompt(source, prompt, settings, (event) => {
+            void send(config, clientId, { type: "run:event", requestId, sessionKey: key, event, at: Date.now() }).catch(() => undefined);
+          });
         activeRuns.set(key, run);
-        void sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: "window" });
+        void sendRequestResponse(config, clientId, requestId, {
+          type: "run:status",
+          requestId,
+          sessionKey: key,
+          status: "running",
+          mode: process.platform === "win32" ? "window" : "managed",
+        });
         try {
           await run.completed;
         } catch (error) {
@@ -396,68 +439,25 @@ async function handleCommand(config, clientId, payload) {
         await sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
         return;
       }
-      const session = await getSession(payload.provider, payload.sessionId);
+      const session = await getSession("codex", payload.sessionId);
       const key = `${session.provider}:${session.id}`;
       await watchSession(config, clientId, session);
       if (activeRuns.has(key)) throw new Error("这个会话仍在执行，请等待或先停止");
-      if (session.provider === "codex") {
-        activeCodexSessionId = session.id;
-        const run = sendToCodexSession(session.id, prompt);
-        activeRuns.set(key, run);
-        void sendRequestResponse(config, clientId, requestId, {
-          type: "run:status",
-          requestId,
-          sessionKey: key,
-          status: "running",
-          mode: "window",
-        });
-        try {
-          await run.completed;
-          invalidateSessions();
-          await sendRequestResponse(config, clientId, requestId, {
-            type: "run:status",
+      activeCodexSessionId = session.id;
+      const managed = process.platform !== "win32" || payload.execution === "managed";
+      const run = managed
+        ? sendPrompt(session, prompt, settings, (event) => {
+          void send(config, clientId, {
+            type: "run:event",
             requestId,
             sessionKey: key,
-            status: "submitted",
-          });
-        } catch (error) {
-          await sendRequestResponse(config, clientId, requestId, {
-            type: "run:status",
-            requestId,
-            sessionKey: key,
-            status: "failed",
-            error: userFacingError(error),
-          });
-        } finally {
-          activeRuns.delete(key);
-          invalidateSessions();
-          const updated = await getSession(session.provider, session.id).catch(() => null);
-          if (updated) {
-            await sendBestEffort(config, clientId, {
-              type: "session:snapshot",
-              requestId,
-              session: stableSessionSnapshot(updated),
-            });
-          }
-          await sendBestEffort(config, clientId, {
-            type: "sessions:snapshot",
-            requestId,
-            sessions: await publicSessions(),
-          });
-        }
-        return;
-      }
-      const run = sendPrompt(session, prompt, mode, (event) => {
-        void send(config, clientId, {
-          type: "run:event",
-          requestId,
-          sessionKey: key,
-          event,
-          at: Date.now(),
-        }).catch(() => undefined);
-      });
+            event,
+            at: Date.now(),
+          }).catch(() => undefined);
+        })
+        : sendToCodexSession(session.id, prompt);
       activeRuns.set(key, run);
-      void sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "running", mode });
+      void sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: managed ? "managed" : "window" });
       try {
         await run.completed;
         invalidateSessions();
@@ -518,6 +518,7 @@ async function poll(config) {
         device: { name: config.deviceName, platform: process.platform },
       });
       await send(config, paired.clientId, { type: "sessions:snapshot", sessions: await publicSessions() });
+      void getCodexStatus().then((status) => sendBestEffort(config, paired.clientId, { type: "codex:status", status })).catch(() => undefined);
       console.log(`手机已配对：${paired.clientId}`);
       continue;
     }
@@ -559,11 +560,10 @@ async function controlState(config) {
 
 async function updateProviderHomes(config, body) {
   const codexHome = normalizeProviderHome("codex", body?.codexHome);
-  const claudeHome = normalizeProviderHome("claude", body?.claudeHome);
-  if (codexHome.length > 1_000 || claudeHome.length > 1_000) throw new Error("目录路径过长");
+  if (codexHome.length > 1_000) throw new Error("目录路径过长");
   config.codexHome = codexHome;
-  config.claudeHome = claudeHome;
-  configureSessionRoots({ codexHome, claudeHome });
+  delete config.claudeHome;
+  configureSessionRoots({ codexHome });
   await saveConfig(config);
   invalidateSessions();
   lastSessionSignature = "";
@@ -595,6 +595,7 @@ async function approvePair(config, body) {
     device: { name: config.deviceName, platform: process.platform },
   });
   await send(config, result.clientId, { type: "sessions:snapshot", sessions: await publicSessions() });
+  void getCodexStatus().then((status) => sendBestEffort(config, result.clientId, { type: "codex:status", status })).catch(() => undefined);
   return { ok: true };
 }
 
@@ -652,7 +653,7 @@ async function syncExternalChanges(config) {
 
 async function main() {
   const config = await loadConfig();
-  configureSessionRoots({ codexHome: config.codexHome, claudeHome: config.claudeHome });
+  configureSessionRoots({ codexHome: config.codexHome });
   for (const [clientId, client] of Object.entries(config.clients)) {
     if (client.watch?.key && client.watch?.provider && client.watch?.sessionId) {
       subscriptions.set(clientId, { ...client.watch, refreshedAt: Date.now() });

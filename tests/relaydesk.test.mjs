@@ -121,15 +121,14 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(pairing, /fetchPairJson/);
   assert.match(pairing, /requestNonce/);
   assert.match(browser, /Codex/);
-  assert.match(meta, /Claude Code/);
+  assert.doesNotMatch(meta, /Claude Code/);
   assert.match(conversation, /返回会话列表/);
   assert.match(conversation, /回复会持续显示在这里/);
   assert.match(conversation, /发送后会排到当前任务后/);
   assert.match(conversation, /!session\.currentWindow && transcriptWorking/);
   assert.doesNotMatch(conversation, /disabled=\{!draft\.trim\(\) \|\| sending \|\| isWorking\}/);
   assert.match(conversation, /任务进行中/);
-  assert.match(conversation, /需确认/);
-  assert.match(conversation, /自动执行/);
+  assert.match(conversation, /run-settings-button/);
   assert.match(conversation, /reply-pulse/);
   assert.match(page, /session:watch/);
   assert.match(page, /session:activate/);
@@ -143,6 +142,9 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(page, /controller\.abort\(\)/);
   assert.match(page, /deliveryAcksRef/);
   assert.match(page, /deliveryAttempt < 3/);
+  assert.match(page, /sessions:loading/);
+  assert.match(page, /codex:status/);
+  assert.match(page, /CodexSettings/);
   assert.doesNotMatch(page, /consecutivePollFailures/);
   assert.match(meta, /export function mergeSessionMessages/);
   assert.match(page, /visibilitychange/);
@@ -174,12 +176,31 @@ test("the agent persists and renews a selected-session subscription", async () =
   assert.match(agent, /claimMutatingRequest/);
   assert.match(agent, /rememberRequestResponse/);
   assert.match(agent, /if \(claim\.response\) void sendBestEffort/);
-  assert.match(agent, /sendToCodexSession/);
+  assert.match(agent, /sendPrompt/);
+  assert.match(agent, /getCodexStatus/);
+  assert.match(agent, /sessions:loading/);
   assert.match(agent, /activeCodexSessionId/);
   assert.match(agent, /sessionDiagnostics/);
   assert.match(agent, /sessions:ack/);
   assert.match(agent, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)/);
   assert.match(agent, /中继服务返回\\s\*5\\d\\d/);
+});
+
+test("Codex capabilities come from the local app server", async () => {
+  const [status, settings, setup] = await Promise.all([
+    readFile(new URL("../agent/codex-status.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/codex-settings.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/setup.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(status, /model\/list/);
+  assert.match(status, /account\/rateLimits\/read/);
+  assert.match(status, /includeHidden: false/);
+  assert.doesNotMatch(status, /email:/);
+  assert.match(settings, /思考强度/);
+  assert.match(settings, /权限范围/);
+  assert.match(settings, /本期可用/);
+  assert.match(setup, /LaunchAgents/);
+  assert.match(setup, /Microsoft :: Windows|process\.platform === "win32"/);
 });
 
 test("the desktop bridge never exposes an arbitrary shell endpoint", async () => {
@@ -200,10 +221,10 @@ test("current-window injection is restricted to the Codex composer", async () =>
   assert.match(script, /Chrome_RenderWidgetHostHWND/);
   assert.match(script, /Current\.Name -eq "Codex"/);
   assert.match(script, /Current\.ClassName -like "ProseMirror\*"/);
-  assert.match(script, /unsent text in its composer/);
+  assert.match(script, /Send-VirtualKeys @\(0x11, 0x41\)[\s\S]*Send-VirtualKeys @\(0x08\)[\s\S]*Send-VirtualKeys @\(0x11, 0x56\)/);
+  assert.doesNotMatch(script, /StashDraft|draft-backups|unsent text in its composer|could not be cleared/);
   assert.match(script, /Send-VirtualKeys @\(0x0D\)/);
   assert.match(script, /V29yayB3aXRoIENoYXRHUFQ=/);
-  assert.match(script, /resumeExistingPrompt/);
   assert.match(script, /OutputEncoding/);
   assert.match(script, /AllowUnavailable/);
   assert.doesNotMatch(script, /InvokePattern/);

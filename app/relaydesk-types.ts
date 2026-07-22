@@ -1,5 +1,44 @@
-export type Provider = "codex" | "claude";
-export type PermissionMode = "safe" | "full";
+export type Provider = "codex";
+export type PermissionMode = "read-only" | "workspace" | "full";
+
+export type CodexModel = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  defaultReasoningEffort: string | null;
+  supportedReasoningEfforts: Array<{ reasoningEffort: string; description?: string }>;
+  serviceTiers: Array<{ id: string; name: string; description?: string }>;
+  defaultServiceTier: string | null;
+};
+
+export type RateLimitWindow = {
+  usedPercent: number;
+  windowDurationMins: number;
+  resetsAt: number;
+};
+
+export type CodexStatus = {
+  available: boolean;
+  models: CodexModel[];
+  account: { type: string | null; planType: string | null } | null;
+  usage: {
+    planType: string | null;
+    primary: RateLimitWindow | null;
+    secondary: RateLimitWindow | null;
+    credits: { hasCredits: boolean; unlimited: boolean; balance: string | null } | null;
+  };
+  platform: { os: string; release: string; arch: string };
+  updatedAt: number;
+};
+
+export type RunSettings = {
+  model: string;
+  reasoning: string;
+  permission: PermissionMode;
+  serviceTier: string;
+};
 
 export type SessionSummary = {
   id: string;

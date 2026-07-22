@@ -78,8 +78,8 @@ export async function startControlServer({ controlToken, getState, approve, reje
 }
 
 export function openControlPanel() {
-  if (process.platform === "win32") {
-    const child = spawn("explorer.exe", [CONTROL_URL], { windowsHide: true, detached: true, stdio: "ignore" });
-    child.unref();
-  }
+  const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+  const child = spawn(command, [CONTROL_URL], { windowsHide: true, detached: true, stdio: "ignore" });
+  child.once("error", () => undefined);
+  child.unref();
 }

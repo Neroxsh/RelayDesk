@@ -7,8 +7,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "RelayDesk — Codex 与 Claude Code 远程工作台";
-  const description = "从手机继续电脑上的 Codex 与 Claude Code 会话。";
+  const title = "RelayDesk — 随时继续 Codex";
+  const description = "从手机继续电脑上的 Codex 会话。";
   return {
     metadataBase: new URL(origin),
     title,

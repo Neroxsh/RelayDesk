@@ -2,7 +2,9 @@
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConversationView, EmptyConversation } from "./components/conversation-view";
+import { CodexSettings } from "./components/codex-settings";
 import { PairingScreen } from "./components/pairing-screen";
+import { SessionLoader } from "./components/session-loader";
 import { SessionBrowser } from "./components/session-browser";
 import { decryptJson, encryptJson, importSessionKey, requestId } from "./remote-crypto";
 import {
@@ -15,12 +17,12 @@ import {
 } from "./relaydesk-meta";
 import type {
   DeviceStatus,
+  CodexStatus,
   Message,
-  PermissionMode,
   PollResponse,
   ProjectGroup,
-  Provider,
   RemotePayload,
+  RunSettings,
   SessionDetail,
   SessionSummary,
   StoredPairing,
@@ -35,10 +37,15 @@ export default function Home() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [details, setDetails] = useState<Record<string, SessionDetail>>({});
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [activeProvider, setActiveProvider] = useState<Provider>("codex");
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
-  const [mode, setMode] = useState<PermissionMode>("safe");
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [settings, setSettings] = useState<RunSettings>({ model: "", reasoning: "", permission: "workspace", serviceTier: "" });
+  const [settingsCustomized, setSettingsCustomized] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [loadingProgress, setLoadingProgress] = useState(8);
+  const [loadingLabel, setLoadingLabel] = useState("正在连接电脑");
   const [running, setRunning] = useState<Record<string, string>>({});
   const [liveMessages, setLiveMessages] = useState<Record<string, Message[]>>({});
   const [toast, setToast] = useState("");
@@ -149,8 +156,32 @@ export default function Home() {
       optimisticRef.current.delete(remoteRequestId);
     };
 
+    if (payload.type === "sessions:loading") {
+      setSessionsLoading(true);
+      setLoadingProgress(Math.max(4, Math.min(96, Number(payload.progress) || 12)));
+      setLoadingLabel(String(payload.label ?? "正在读取 Codex 会话"));
+      return;
+    }
+
+    if (payload.type === "codex:status" && payload.status) {
+      const status = payload.status as CodexStatus;
+      setCodexStatus(status);
+      setSettings((current) => {
+        if (current.model) return current;
+        const model = status.models.find((item) => item.isDefault) ?? status.models[0];
+        return model ? {
+          ...current,
+          model: model.model,
+          reasoning: model.defaultReasoningEffort ?? model.supportedReasoningEfforts[0]?.reasoningEffort ?? "",
+        } : current;
+      });
+      return;
+    }
+
     if (payload.type === "sessions:snapshot" && Array.isArray(payload.sessions)) {
       setSessions(payload.sessions as SessionSummary[]);
+      setLoadingProgress(100);
+      setSessionsLoading(false);
       void remoteSend({
         type: "sessions:ack",
         count: payload.sessions.length,
@@ -347,15 +378,12 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const providerCounts = useMemo(() => ({
-    codex: sessions.filter((session) => session.provider === "codex" && !session.currentWindow).length,
-    claude: sessions.filter((session) => session.provider === "claude").length,
-  }), [sessions]);
+  const sessionCount = useMemo(() => sessions.filter((session) => !session.currentWindow).length, [sessions]);
 
   const projectGroups = useMemo<ProjectGroup[]>(() => {
     const needle = query.trim().toLowerCase();
     const matches = sessions
-      .filter((session) => !session.currentWindow && session.provider === activeProvider)
+      .filter((session) => !session.currentWindow)
       .filter((session) => !needle || `${session.title} ${session.cwd}`.toLowerCase().includes(needle));
     const map = new Map<string, ProjectGroup>();
     for (const session of matches) {
@@ -366,7 +394,7 @@ export default function Home() {
       map.set(path, group);
     }
     return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [sessions, query, activeProvider]);
+  }, [sessions, query]);
 
   const selectedDetail = selectedKey ? details[selectedKey] : null;
   const messages = selectedKey ? [...(selectedDetail?.messages ?? []), ...(liveMessages[selectedKey] ?? [])] : [];
@@ -374,7 +402,7 @@ export default function Home() {
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!selectedSummary || !draft.trim() || sending) return;
-    if (!selectedSummary.currentWindow && mode === "full" && !window.confirm("自动执行会跳过电脑端的逐项确认。继续？")) return;
+    if (!selectedSummary.currentWindow && settings.permission === "full" && !window.confirm("完全访问允许 Codex 操作工作区之外的文件。继续发送？")) return;
     const prompt = draft.trim();
     const remoteRequestId = requestId();
     const optimisticId = `local-${remoteRequestId}`;
@@ -383,7 +411,8 @@ export default function Home() {
       provider: selectedSummary.provider,
       sessionId: selectedSummary.id,
       prompt,
-      mode,
+      settings,
+      execution: settingsCustomized ? "managed" : "desktop",
       requestId: remoteRequestId,
     };
     const deliveryAcknowledged = new Promise<boolean>((resolve) => {
@@ -447,12 +476,6 @@ export default function Home() {
     setPairing(null);
   }
 
-  function switchProvider(provider: Provider) {
-    setActiveProvider(provider);
-    setSelectedKey(null);
-    setQuery("");
-  }
-
   function selectSession(session: SessionSummary) {
     setSelectedKey(session.key);
     if (session.provider === "codex" && !session.currentWindow) {
@@ -472,26 +495,48 @@ export default function Home() {
       .catch((error) => setToast(error instanceof Error ? error.message : "无法停止任务"));
   }
 
-  if (!hydrated) return <main className="loading-shell"><strong>RelayDesk</strong><span>正在连接电脑…</span></main>;
+  function refreshWorkspace() {
+    setSessionsLoading(true);
+    setLoadingProgress(10);
+    setLoadingLabel("正在同步 Codex");
+    void remoteSend({ type: "sessions:list", requestId: requestId() }).catch((error) => {
+      setSessionsLoading(false);
+      setToast(error instanceof Error ? error.message : "同步失败");
+    });
+  }
+
+  function refreshCodexStatus() {
+    void remoteSend({ type: "codex:status:get", refresh: true, requestId: requestId() })
+      .catch((error) => setToast(error instanceof Error ? error.message : "无法读取用量"));
+  }
+
+  const selectedModel = codexStatus?.models.find((model) => model.model === settings.model)
+    ?? codexStatus?.models.find((model) => model.isDefault)
+    ?? codexStatus?.models[0];
+
+  if (!hydrated) return <main className="loading-shell"><SessionLoader progress={12} label="正在启动 RelayDesk" /></main>;
   if (!pairing) return <PairingScreen onPaired={setPairing} />;
 
   return (
-    <main className={`app-shell ${selectedSummary ? "has-selection" : ""}`} data-provider={activeProvider}>
+    <main className={`app-shell ${selectedSummary ? "has-selection" : ""}`} data-provider="codex">
       <SessionBrowser
-        activeProvider={activeProvider}
-        providerCounts={providerCounts}
+        sessionCount={sessionCount}
         device={visibleDevice}
         pairing={pairing}
+        status={codexStatus}
+        loading={sessionsLoading}
+        loadingProgress={loadingProgress}
+        loadingLabel={loadingLabel}
         currentWindow={currentWindow}
         selectedKey={selectedKey}
         query={query}
         projectGroups={projectGroups}
         collapsed={collapsed}
         running={running}
-        onProviderChange={switchProvider}
         onSelect={selectSession}
         onQueryChange={setQuery}
-        onRefresh={() => void remoteSend({ type: "sessions:list", requestId: requestId() })}
+        onRefresh={refreshWorkspace}
+        onOpenSettings={() => setSettingsOpen(true)}
         onForgetPhone={forgetPhone}
         setCollapsed={setCollapsed}
       />
@@ -504,17 +549,30 @@ export default function Home() {
           device={visibleDevice}
           runningStatus={running[selectedSummary.key]}
           draft={draft}
-          mode={mode}
+          settings={settings}
+          modelName={selectedModel?.displayName ?? "默认模型"}
+          managedSettings={settingsCustomized}
           sending={sending}
           messageEndRef={messageEndRef}
           onBack={() => setSelectedKey(null)}
           onDraftChange={setDraft}
-          onModeChange={setMode}
+          onOpenSettings={() => setSettingsOpen(true)}
           onSubmit={submit}
           onKeyDown={keyDown}
           onStop={stopSession}
         />
-      ) : <EmptyConversation provider={activeProvider} />}
+      ) : <EmptyConversation provider="codex" />}
+
+      {settingsOpen ? <CodexSettings
+        status={codexStatus}
+        settings={settings}
+        currentWindow={Boolean(selectedSummary?.currentWindow)}
+        customized={settingsCustomized}
+        onChange={(value) => { setSettings(value); setSettingsCustomized(true); }}
+        onClose={() => setSettingsOpen(false)}
+        onRefresh={refreshCodexStatus}
+        onUseDesktopSettings={() => setSettingsCustomized(false)}
+      /> : null}
 
       {toast ? <div className="toast" role="status">{toast}</div> : null}
     </main>

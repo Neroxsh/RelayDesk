@@ -1,14 +1,25 @@
 # RelayDesk
 
-在手机上继续电脑里的 Codex 和 Claude Code。会话仍然运行在自己的电脑上，RelayDesk 只负责加密传输和移动端界面。
+在手机浏览器里继续电脑上的 Codex。无需安装手机 App，也无需在手机登录 ChatGPT。
 
-[手机端](https://relay.xingshihao.site) · [问题反馈](https://github.com/Neroxsh/RelayDesk/issues)
+[打开手机端](https://relay.xingshihao.site) · [问题反馈](https://github.com/Neroxsh/RelayDesk/issues)
 
-## 开始使用
+## 可以做什么
 
-目前优先支持 Windows 11，电脑需要安装 Node.js 22 或更高版本，并已能正常使用 Codex 或 Claude Code。
+- 按项目查看电脑上的 Codex 会话。
+- 继续历史会话，并实时看到回复和执行进度。
+- 向 Windows 上当前打开的 Codex 窗口发送消息。
+- 选择 Codex 模型、思考强度、工作区权限和快速通道。
+- 查看 Codex 返回的账号套餐与使用额度窗口。
+- 一次配对，之后直接打开手机网页。
 
-### 从源码安装
+## 系统要求
+
+- Windows 10、Windows 11 或 macOS。
+- Node.js 22.13 或更高版本。
+- 已安装并登录 Codex CLI。Windows 可同时使用 Codex 桌面应用。
+
+## 安装
 
 ```powershell
 git clone https://github.com/Neroxsh/RelayDesk.git
@@ -17,79 +28,42 @@ npm install
 npm run setup
 ```
 
-### 用 pip 安装
+也可以通过 Python 包入口安装：
 
 ```powershell
 pip install git+https://github.com/Neroxsh/RelayDesk.git
 relaydesk setup
 ```
 
-安装完成后会打开电脑控制中心，并显示两个地址：
-
-- 电脑控制中心：`http://127.0.0.1:43127`
-- 手机端：`https://relay.xingshihao.site`
-
-手机输入电脑端显示的配对码，再回到电脑确认。确认一次后会保持连接，除非在电脑控制中心主动解除。
-
-## 能做什么
-
-- Codex 和 Claude Code 分开展示，并按项目整理会话。
-- 继续历史会话，或直接给当前 Codex 窗口发送指令。
-- 手机打开会话时，回答和任务进度会持续同步；切到后台后再次打开会自动补齐。
-- 在电脑控制中心查看、确认和解除已连接设备。
-- 安全模式只使用工具自身的受限执行；需要自动执行时可按会话切换。
-
-## 常用命令
-
-```powershell
-relaydesk setup                 # 安装并启动，Windows 下同时设置开机启动
-relaydesk status                # 检查电脑端是否正在运行
-relaydesk control               # 打开电脑控制中心
-relaydesk start                 # 在当前终端前台运行
-relaydesk setup --relay URL     # 使用自己的中继地址
-```
-
-如果手机已经连接、但看不到电脑上的会话，请打开电脑控制中心。页面底部会显示 Codex 和 Claude Code 实际读取的目录、原始文件数和已识别会话数。RelayDesk 会自动检查当前用户的默认目录，也可以在那里填写自定义的 `.codex` / `.claude` 数据目录；使用 WSL 时可填写对应的 `\\wsl.localhost\...` 路径。
-
-从源码运行时，也可以使用 `npm run setup` 和 `npm run agent -- --relay URL`。
-
-## 它如何工作
-
-电脑端桥接只主动连接 HTTPS 中继，不会向公网开放电脑端口。手机与电脑完成配对后，双方通过 P-256 ECDH 建立密钥，并使用 AES-256-GCM 加密消息。中继负责暂存密文和在线状态，无法读取会话正文。
-
-电脑端只接受 RelayDesk 已定义的会话操作，不提供任意终端入口。配对码、设备密钥和已连接设备保存在 `%USERPROFILE%\.relaydesk\config.json`，不会进入项目目录。
+安装结束后会打开电脑控制中心：
 
 ```text
-手机浏览器  ←── 端到端加密消息 ──→  HTTPS 中继  ←──→  电脑端桥接
-                                                    ├─ Codex
-                                                    └─ Claude Code
+http://127.0.0.1:43127
 ```
 
-## 项目结构
+手机打开 `https://relay.xingshihao.site`，输入电脑显示的 16 位配对码，再回到电脑确认。
+
+Windows 10/11 会写入当前用户的开机启动项。macOS 会安装当前用户的 LaunchAgent。更新代码后重新运行 `npm run setup -- --yes` 即可刷新启动配置。
+
+## 会话没有出现
+
+RelayDesk 会依次检查 `CODEX_HOME`、当前用户的 `.codex` 目录、XDG 配置目录和 Windows 的 Codex 数据目录。若 Codex 使用了自定义位置，可在电脑控制中心填写 `.codex` 或 `sessions` 目录。
+
+## 运行方式
 
 ```text
-app/          移动端 PWA 与中继 API
-agent/        电脑端桥接、会话解析和本机控制中心
-scripts/      安装与开机启动
-tests/        协议、解析、安全边界和界面回归测试
-drizzle/      中继数据库迁移
+手机浏览器 ── 端到端加密 ── 中继 ── 电脑上的 RelayDesk ── Codex
 ```
 
-## 本地开发
+会话内容由手机与电脑端加密和解密。中继负责转发密文。电脑端只提供预定义的会话操作，不开放任意终端接口。
+
+设备配置保存在用户目录的 `.relaydesk/config.json`。配对码和设备密钥不要发给他人。
+
+## 开发
 
 ```powershell
-npm install
-npm run lint
-npm test
 npm run dev
+npm test
 ```
 
-提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 中的方式报告。
-
-## 当前状态
-
-RelayDesk 仍在早期阶段。Windows、Codex Desktop 和 Claude Code 是当前主要测试组合；macOS/Linux 的开机启动尚未完善。默认中继用于快速体验，团队或公开部署建议使用自己的 Cloudflare 项目和域名。
-
-## License
-
-[MIT](LICENSE)
+默认中继便于快速体验。公开发布或团队部署时，建议使用自己的中继与域名。

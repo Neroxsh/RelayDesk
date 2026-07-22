@@ -2,7 +2,6 @@ import type { Message, Provider } from "./relaydesk-types";
 
 export const PROVIDERS: Record<Provider, { name: string; short: string; company: string }> = {
   codex: { name: "Codex", short: "C", company: "OpenAI" },
-  claude: { name: "Claude Code", short: "Cl", company: "Anthropic" },
 };
 
 export const STORAGE_KEY = "relaydesk.pairing.v2";

@@ -9,7 +9,7 @@ const RECENT_ROW_LIMIT = 1_500;
 
 let cache = { at: 0, sessions: [] };
 const transcriptCache = new Map();
-let configuredHomes = { codex: "", claude: "" };
+let configuredHome = "";
 
 function uniquePaths(values) {
   const seen = new Set();
@@ -31,62 +31,62 @@ export function normalizeProviderHome(provider, value) {
   let resolved = cleanPath(value);
   if (!resolved) return "";
   const leaf = path.basename(resolved).toLowerCase();
-  if (provider === "codex") {
-    if (leaf === "sessions") resolved = path.dirname(resolved);
-    if (leaf === "session_index.jsonl") resolved = path.dirname(resolved);
-  } else if (provider === "claude" && leaf === "projects") {
-    resolved = path.dirname(resolved);
-  }
+  if (provider !== "codex") return "";
+  if (leaf === "sessions") resolved = path.dirname(resolved);
+  if (leaf === "session_index.jsonl") resolved = path.dirname(resolved);
   return resolved;
 }
 
-export function configureSessionRoots({ codexHome = "", claudeHome = "" } = {}) {
-  configuredHomes = {
-    codex: normalizeProviderHome("codex", codexHome),
-    claude: normalizeProviderHome("claude", claudeHome),
-  };
+export function configureSessionRoots({ codexHome = "" } = {}) {
+  configuredHome = normalizeProviderHome("codex", codexHome);
   invalidateSessions();
 }
 
-function providerHomes(provider) {
+function providerHomes(provider = "codex") {
   const home = os.homedir();
-  if (provider === "codex") {
-    return uniquePaths([
-      configuredHomes.codex,
-      normalizeProviderHome("codex", process.env.CODEX_HOME),
-      path.join(home, ".codex"),
-      process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".codex") : "",
-      process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "codex") : "",
-      process.env.APPDATA ? path.join(process.env.APPDATA, "Codex") : "",
-    ].map((value) => normalizeProviderHome("codex", value)));
-  }
+  if (provider !== "codex") return [];
   return uniquePaths([
-    configuredHomes.claude,
-    normalizeProviderHome("claude", process.env.CLAUDE_CONFIG_DIR),
-    path.join(home, ".claude"),
-    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".claude") : "",
-    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "claude") : "",
-  ].map((value) => normalizeProviderHome("claude", value)));
+    configuredHome,
+    normalizeProviderHome("codex", process.env.CODEX_HOME),
+    path.join(home, ".codex"),
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".codex") : "",
+    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "codex") : "",
+    process.env.APPDATA ? path.join(process.env.APPDATA, "Codex") : "",
+  ].map((value) => normalizeProviderHome("codex", value)));
 }
 
 function providerRoots(provider) {
-  const child = provider === "codex" ? "sessions" : "projects";
-  return providerHomes(provider).map((home) => ({ home, root: path.join(home, child) }));
+  return providerHomes(provider).map((home) => ({ home, root: path.join(home, "sessions") }));
 }
 
 async function walk(directory) {
   const files = [];
   try {
     const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
+    const nested = await Promise.all(entries.map(async (entry) => {
       const absolute = path.join(directory, entry.name);
-      if (entry.isDirectory()) files.push(...(await walk(absolute)));
-      else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(absolute);
-    }
+      if (entry.isDirectory()) return walk(absolute);
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) return [absolute];
+      return [];
+    }));
+    files.push(...nested.flat());
   } catch (error) {
     if (error?.code !== "ENOENT" && error?.code !== "EACCES") throw error;
   }
   return files;
+}
+
+async function mapConcurrent(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function readSlice(filePath, start, length) {
@@ -181,11 +181,6 @@ function sanitizeUserText(value) {
   return text.trim();
 }
 
-function isMetadataOnly(value) {
-  const text = sanitizeUserText(value);
-  return !text || /^(?:<[^>]+>|# AGENTS\.md instructions|# Session title|<INSTRUCTIONS>)/i.test(text);
-}
-
 async function codexThreadNames(homes = providerHomes("codex")) {
   const names = new Map();
   for (const home of homes) {
@@ -238,54 +233,35 @@ function codexMeta(rows, filePath, threadNames) {
   };
 }
 
-function claudeMeta(rows, filePath) {
-  const first = rows.find((row) => row?.sessionId || row?.cwd) ?? {};
-  const user = rows.find((row) => row?.type === "user" && !row?.isMeta && !isMetadataOnly(textFromContent(row.message?.content)));
-  return {
-    id: first.sessionId ?? uuidFromFilename(filePath),
-    provider: "claude",
-    title: trimTitle(sanitizeUserText(textFromContent(user?.message?.content))) || "Claude 会话",
-    cwd: first.cwd ?? "",
-    ...projectFields(first.cwd),
-    filePath,
-  };
-}
-
 export async function listSessions(force = false) {
   if (!force && Date.now() - cache.at < 2_000) return cache.sessions;
   const codexLocations = providerRoots("codex");
-  const claudeLocations = providerRoots("claude");
-  const [codexGroups, claudeGroups, threadNames] = await Promise.all([
+  const [codexGroups, threadNames] = await Promise.all([
     Promise.all(codexLocations.map(({ root }) => walk(root))),
-    Promise.all(claudeLocations.map(({ root }) => walk(root))),
     codexThreadNames(codexLocations.map(({ home }) => home)),
   ]);
   const codexFiles = uniquePaths(codexGroups.flat());
-  const claudeFiles = uniquePaths(claudeGroups.flat());
+  const records = await mapConcurrent(codexFiles, 16, async (filePath) => {
+    try {
+      const info = await stat(filePath);
+      const headRows = parseLines(await readHead(filePath));
+      const session = codexMeta(headRows, filePath, threadNames);
+      return {
+        ...session,
+        key: `codex:${session.id}`,
+        updatedAt: info.mtimeMs,
+        recent: Date.now() - info.mtimeMs < 2 * 60_000,
+      };
+    } catch {
+      return null;
+    }
+  });
   const sessions = [];
   const sessionKeys = new Set();
-  for (const [provider, files] of [
-    ["codex", codexFiles],
-    ["claude", claudeFiles],
-  ]) {
-    for (const filePath of files) {
-      try {
-        const info = await stat(filePath);
-        const headRows = parseLines(await readHead(filePath));
-        const session = provider === "codex" ? codexMeta(headRows, filePath, threadNames) : claudeMeta(headRows, filePath);
-        const sessionKey = `${provider}:${session.id}`;
-        if (sessionKeys.has(sessionKey)) continue;
-        sessionKeys.add(sessionKey);
-        sessions.push({
-          ...session,
-          key: sessionKey,
-          updatedAt: info.mtimeMs,
-          recent: Date.now() - info.mtimeMs < 2 * 60_000,
-        });
-      } catch {
-        // Skip a transient or malformed provider file.
-      }
-    }
+  for (const session of records) {
+    if (!session || sessionKeys.has(session.key)) continue;
+    sessionKeys.add(session.key);
+    sessions.push(session);
   }
   sessions.sort((a, b) => b.updatedAt - a.updatedAt);
   cache = { at: Date.now(), sessions };
@@ -294,7 +270,8 @@ export async function listSessions(force = false) {
 
 export async function sessionDiagnostics() {
   const parsedSessions = await listSessions();
-  const inspect = async (provider) => {
+  const inspect = async () => {
+    const provider = "codex";
     const locations = providerRoots(provider);
     const groups = await Promise.all(locations.map(({ root }) => walk(root)));
     const counts = locations.map(({ home, root }, index) => ({ home, root, count: groups[index].length }));
@@ -302,7 +279,7 @@ export async function sessionDiagnostics() {
     const fileCount = uniquePaths(groups.flat()).length;
     const count = parsedSessions.filter((session) => session.provider === provider).length;
     return {
-      configuredHome: configuredHomes[provider],
+      configuredHome,
       activeHome: active.home,
       activeRoot: active.root,
       count,
@@ -311,8 +288,7 @@ export async function sessionDiagnostics() {
       searched: counts.map(({ home, root, count }) => ({ home, root, count })),
     };
   };
-  const [codex, claude] = await Promise.all([inspect("codex"), inspect("claude")]);
-  return { codex, claude };
+  return { codex: await inspect() };
 }
 
 function pushMessage(messages, role, content, timestamp, meta) {
@@ -408,22 +384,6 @@ export function parseCodexTranscript(rows) {
   return { messages, activity: activity.slice(-40), state, hasTaskSignal: sawTaskSignal };
 }
 
-export function parseClaudeTranscript(rows) {
-  const messages = [];
-  const activity = [];
-  for (const [index, row] of rows.entries()) {
-    if ((row?.type === "user" || row?.type === "assistant") && !row?.isMeta) {
-      pushMessage(messages, row.type, textFromContent(row.message?.content), row.timestamp ?? null);
-      for (const item of Array.isArray(row.message?.content) ? row.message.content : []) {
-        if (item?.type === "tool_use") {
-          activity.push(activityItem(row, index, `调用 ${item.name ?? "工具"}`));
-        }
-      }
-    }
-  }
-  return { messages, activity: activity.slice(-40), state: "idle", hasTaskSignal: false };
-}
-
 function mergeMessages(previous, incoming) {
   const result = [...previous];
   const seen = new Set(previous.map((message) => `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`));
@@ -436,8 +396,8 @@ function mergeMessages(previous, incoming) {
   return result.slice(-120);
 }
 
-function parserFor(provider) {
-  return provider === "codex" ? parseCodexTranscript : parseClaudeTranscript;
+function parserFor() {
+  return parseCodexTranscript;
 }
 
 function enoughContext(transcript, fileSize, bytes) {
@@ -495,7 +455,7 @@ async function cachedTranscript(provider, filePath) {
 }
 
 export async function readSessionTranscript(provider, filePath) {
-  if (!["codex", "claude"].includes(provider)) throw new Error("不支持的会话类型");
+  if (provider !== "codex") throw new Error("当前版本仅支持 Codex");
   return cachedTranscript(provider, filePath);
 }
 

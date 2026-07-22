@@ -30,8 +30,8 @@ function resolveOnWindows(name) {
   return found && fs.existsSync(found) ? found : null;
 }
 
-function providerExecutable(provider) {
-  const name = provider === "codex" ? "codex" : "claude";
+export function codexExecutable() {
+  const name = "codex";
   if (process.platform !== "win32") return { command: name, prefix: [] };
   const found = resolveOnWindows(name);
   if (!found) throw new Error(`没有找到 ${name}，请先在电脑上安装并登录`);
@@ -50,53 +50,49 @@ function providerExecutable(provider) {
   return { command: found, prefix: [] };
 }
 
-function argsFor(session, mode) {
-  if (session.provider === "codex") {
-    const args = ["exec", "resume", "--json", "--skip-git-repo-check"];
-    if (mode === "full") args.push("--dangerously-bypass-approvals-and-sandbox");
-    args.push(session.id, "-");
-    return args;
+function quotedConfig(value) {
+  return JSON.stringify(String(value));
+}
+
+function argsFor(session, settings = {}) {
+  const args = ["exec", "resume", "--json", "--skip-git-repo-check"];
+  const permission = ["read-only", "workspace", "full"].includes(settings.permission)
+    ? settings.permission
+    : "workspace";
+  if (permission === "full") {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else {
+    args.push("--sandbox", permission === "read-only" ? "read-only" : "workspace-write");
+    args.push("--ask-for-approval", "never");
   }
-  const args = [
-    "-p",
-    "--resume",
-    session.id,
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--permission-mode",
-    mode === "full" ? "bypassPermissions" : "dontAsk",
-  ];
-  if (mode === "full") args.push("--dangerously-skip-permissions");
+  if (settings.model && /^[\w.:-]{1,100}$/.test(settings.model)) args.push("--model", settings.model);
+  if (settings.reasoning && /^[\w-]{1,32}$/.test(settings.reasoning)) {
+    args.push("--config", `model_reasoning_effort=${quotedConfig(settings.reasoning)}`);
+  }
+  if (settings.serviceTier && /^[\w-]{1,32}$/.test(settings.serviceTier)) {
+    args.push("--config", `service_tier=${quotedConfig(settings.serviceTier)}`);
+  }
+  args.push(session.id, "-");
   return args;
 }
 
-function summarize(provider, row) {
-  if (provider === "codex") {
-    if (row?.type === "item.completed" && row.item?.type === "agent_message") {
-      return { type: "assistant", text: row.item.text ?? "" };
-    }
-    if (row?.type === "item.completed" && row.item?.type === "command_execution") {
-      return { type: "tool", text: row.item.command ?? "命令已完成", status: row.item.status };
-    }
-    if (row?.type === "turn.failed" || row?.type === "error") {
-      return { type: "error", text: row.error?.message ?? row.message ?? "Codex 执行失败" };
-    }
-    return null;
+function summarize(row) {
+  if (row?.type === "item.completed" && row.item?.type === "agent_message") {
+    return { type: "assistant", text: row.item.text ?? "" };
   }
-  if (row?.type === "assistant") {
-    const text = Array.isArray(row.message?.content)
-      ? row.message.content.filter((item) => item?.type === "text").map((item) => item.text).join("\n")
-      : "";
-    return text ? { type: "assistant", text } : null;
+  if (row?.type === "item.completed" && row.item?.type === "command_execution") {
+    return { type: "tool", text: row.item.command ?? "命令已完成", status: row.item.status };
   }
-  if (row?.type === "result" && row.is_error) return { type: "error", text: row.result ?? "Claude 执行失败" };
+  if (row?.type === "turn.failed" || row?.type === "error") {
+    return { type: "error", text: row.error?.message ?? row.message ?? "Codex 执行失败" };
+  }
   return null;
 }
 
-export function sendPrompt(session, prompt, mode, onEvent) {
-  const executable = providerExecutable(session.provider);
-  const args = [...executable.prefix, ...argsFor(session, mode)];
+export function sendPrompt(session, prompt, settings, onEvent) {
+  if (session.provider !== "codex") throw new Error("当前版本仅支持 Codex");
+  const executable = codexExecutable();
+  const args = [...executable.prefix, ...argsFor(session, settings)];
   const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
   const child = spawn(executable.command, args, {
     cwd,
@@ -114,7 +110,7 @@ export function sendPrompt(session, prompt, mode, onEvent) {
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const summary = summarize(session.provider, JSON.parse(line));
+        const summary = summarize(JSON.parse(line));
         if (summary) onEvent(summary);
       } catch {
         onEvent({ type: "log", text: line.slice(0, 8_000) });
@@ -134,7 +130,7 @@ export function sendPrompt(session, prompt, mode, onEvent) {
     child.once("close", (code, signal) => {
       if (stdoutBuffer.trim()) consume("\n");
       if (code === 0) resolve({ code, signal });
-      else reject(new Error(stderrBuffer.trim() || `${session.provider} 已退出（${code ?? signal}）`));
+      else reject(new Error(stderrBuffer.trim() || `Codex 已退出（${code ?? signal}）`));
     });
   });
   void completed.catch(() => undefined);
@@ -194,18 +190,12 @@ export function sendToCurrentCodex(prompt) {
 }
 
 export function openCodexSession(sessionId) {
-  if (process.platform !== "win32") throw new Error("打开 Codex 桌面会话目前只支持 Windows");
   const url = codexThreadUrl(sessionId);
-  const child = spawn(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `Start-Process -FilePath '${url}'`,
-    ],
-    { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] },
-  );
+  const command = process.platform === "win32" ? "powershell.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+  const args = process.platform === "win32"
+    ? ["-NoProfile", "-NonInteractive", "-Command", `Start-Process -FilePath '${url}'`]
+    : [url];
+  const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
   const completed = new Promise((resolve, reject) => {
