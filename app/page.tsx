@@ -279,7 +279,16 @@ export default function Home() {
     if (!pairing) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
+    let pollInFlight = false;
+    const schedule = (delay: number) => {
+      if (!stopped) {
+        clearTimeout(timer);
+        timer = setTimeout(poll, delay);
+      }
+    };
     const poll = async () => {
+      if (stopped || pollInFlight) return;
+      pollInFlight = true;
       try {
         const response = await fetch(`/api/client/poll?after=${cursorRef.current}`, {
           headers: {
@@ -299,7 +308,12 @@ export default function Home() {
           return;
         }
         if (!response.ok) throw new Error(data.error ?? "同步失败");
-        if (!stopped && data.device) setDevice(data.device);
+        if (!stopped && data.device) {
+          setDevice(data.device);
+          // A successful poll is also a fresh view of the agent heartbeat. Keep a
+          // short grace window so a single relay hiccup does not flip the UI offline.
+          if (data.device.online) setAgentContactAt(Date.now());
+        }
         if (!keyRef.current) keyRef.current = await importSessionKey(pairing.key);
         for (const message of data.messages ?? []) {
           cursorRef.current = Math.max(cursorRef.current, Number(message.id) || 0);
@@ -311,11 +325,11 @@ export default function Home() {
           }
         }
         localStorage.setItem(cursorKey(pairing.clientId), String(cursorRef.current));
-        if (!stopped) timer = setTimeout(poll, document.visibilityState === "visible" ? 700 : 2_500);
+        schedule(document.visibilityState === "visible" ? 700 : 2_500);
       } catch {
-        if (!stopped) {
-          timer = setTimeout(poll, 2_500);
-        }
+        schedule(2_500);
+      } finally {
+        pollInFlight = false;
       }
     };
     void remoteSend({ type: "sessions:list", requestId: requestId() }).catch(() => undefined);
@@ -330,14 +344,31 @@ export default function Home() {
         void remoteSend({ type: "ping", requestId: requestId() }).catch(() => undefined);
       }
     }, 15_000);
+    const resume = () => {
+      if (document.visibilityState === "visible" || navigator.onLine) {
+        clearTimeout(timer);
+        void poll();
+      }
+    };
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("online", resume);
     void poll();
-    return () => { stopped = true; clearTimeout(timer); clearInterval(sessionTimer); clearInterval(pingTimer); };
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      clearInterval(sessionTimer);
+      clearInterval(pingTimer);
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("online", resume);
+    };
   }, [pairing, handlePayload, remoteSend]);
 
   const currentWindow = sessions.find((session) => session.currentWindow);
   const visibleDevice = useMemo<DeviceStatus | null>(() => device ? {
     ...device,
-    online: device.online || (agentContactAt > 0 && clock - agentContactAt < 60_000),
+    // Allow a few relay intervals for mobile networks, background tabs and
+    // transient 5xx responses. A truly stopped agent will still turn offline.
+    online: device.online || (agentContactAt > 0 && clock - agentContactAt < 180_000),
   } : null, [device, agentContactAt, clock]);
   const selectedSummary = sessions.find((session) => session.key === selectedKey) ?? null;
   const selectedSessionId = selectedSummary?.id;
@@ -543,6 +574,7 @@ export default function Home() {
 
       {selectedSummary ? (
         <ConversationView
+          key={selectedSummary.key}
           session={selectedSummary}
           detail={selectedDetail}
           messages={messages}

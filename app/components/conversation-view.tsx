@@ -86,7 +86,13 @@ export function ConversationView({
       </header>
 
       <div className="message-scroll">
-        {!detail ? <div className="loading-conversation"><span /><span /><span /></div> : null}
+        {!detail ? (
+          <div className="loading-conversation" role="status" aria-live="polite">
+            <div className="loading-conversation-orbit" aria-hidden="true"><i /><i /><i /></div>
+            <strong>正在打开会话</strong>
+            <span className="loading-line wide" /><span className="loading-line medium" /><span className="loading-line short" />
+          </div>
+        ) : null}
 
         {activity.length ? (
           <details className={`activity-card ${isWorking ? "working" : ""}`} open={isWorking || undefined}>
