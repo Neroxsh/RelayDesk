@@ -90,6 +90,51 @@ export function now() {
   return Date.now();
 }
 
+export const PRESENCE_WRITE_INTERVAL = 60_000;
+export const MESSAGE_RETENTION_PER_TARGET = 30;
+export const MESSAGE_RETENTION_MS = 24 * 60 * 60_000;
+
+export async function touchDevicePresence(deviceId: string, timestamp = now()) {
+  return store()
+    .prepare("UPDATE devices SET last_seen_at = ? WHERE id = ? AND last_seen_at < ?")
+    .bind(timestamp, deviceId, timestamp - PRESENCE_WRITE_INTERVAL)
+    .run();
+}
+
+export async function touchClientPresence(clientId: string, timestamp = now()) {
+  return store()
+    .prepare("UPDATE clients SET last_seen_at = ? WHERE id = ? AND last_seen_at < ?")
+    .bind(timestamp, clientId, timestamp - PRESENCE_WRITE_INTERVAL)
+    .run();
+}
+
+export async function deleteDeliveredMessages(targetId: string, cursor: number) {
+  if (!Number.isFinite(cursor) || cursor <= 0) return;
+  await store()
+    .prepare("DELETE FROM messages WHERE target_id = ? AND id <= ?")
+    .bind(targetId, cursor)
+    .run();
+}
+
+export async function pruneMessageQueue(targetId: string, timestamp = now()) {
+  const db = store();
+  await db.batch([
+    db
+      .prepare("DELETE FROM messages WHERE target_id = ? AND created_at < ?")
+      .bind(targetId, timestamp - MESSAGE_RETENTION_MS),
+    db
+      .prepare(`DELETE FROM messages
+        WHERE target_id = ?
+          AND id < COALESCE((
+            SELECT id FROM messages
+            WHERE target_id = ?
+            ORDER BY id DESC
+            LIMIT 1 OFFSET ?
+          ), -1)`)
+      .bind(targetId, targetId, MESSAGE_RETENTION_PER_TARGET - 1),
+  ]);
+}
+
 export async function sha256(value: string) {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);

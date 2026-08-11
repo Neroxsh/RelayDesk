@@ -4,7 +4,7 @@ const db = getStore({ name: "relaydesk", consistency: "strong" });
 let lastMessageId = 0;
 const pairAttempts = new Map();
 const DEVICE_ONLINE_WINDOW = 120_000;
-const PRESENCE_WRITE_INTERVAL = 15_000;
+const PRESENCE_WRITE_INTERVAL = 60_000;
 const MESSAGE_ID_CEILING = 9_000_000_000_000_000;
 
 const key = {
@@ -422,7 +422,9 @@ async function heartbeat(request) {
   const agent = await authenticateAgent(request);
   if (!agent) return jsonError("设备认证失败", 401);
   const timestamp = now();
-  await putJson(key.device(agent.id), { ...agent, lastSeenAt: timestamp });
+  if (timestamp - Number(agent.lastSeenAt || 0) >= PRESENCE_WRITE_INTERVAL) {
+    await putJson(key.device(agent.id), { ...agent, lastSeenAt: timestamp });
+  }
   return json({ ok: true, at: timestamp });
 }
 
@@ -464,6 +466,32 @@ async function importClients(request) {
     imported += 1;
   }
   return json({ ok: true, imported });
+}
+
+async function exportClients(request) {
+  const agent = await authenticateAgent(request);
+  if (!agent) return jsonError("设备认证失败", 401);
+  const pendingPrefix = `pending/${agent.id}/`;
+  const [{ blobs: pendingBlobs = [] }, { blobs: clientBlobs = [] }] = await Promise.all([
+    db.list({ prefix: pendingPrefix, consistency: "strong", limit: 100, paginate: false }),
+    db.list({ prefix: "clients/", consistency: "strong", limit: 100, paginate: false }),
+  ]);
+  const rows = await Promise.all([
+    ...pendingBlobs.map((blob) => getJson(blob.key)),
+    ...clientBlobs.map((blob) => getJson(blob.key)),
+  ]);
+  return json({
+    clients: rows
+      .filter((client) => client?.deviceId === agent.id && validId(client.id) && validHash(client.tokenHash))
+      .map((client) => ({
+        id: client.id,
+        tokenHash: client.tokenHash,
+        publicKey: client.publicKey,
+        createdAt: client.createdAt,
+        lastSeenAt: client.lastSeenAt,
+        revokedAt: client.revokedAt,
+      })),
+  });
 }
 
 async function legacyPair(request) {
@@ -513,6 +541,7 @@ export default async function onRequest(context) {
     if (request.method === "POST" && path === "/api/client/send") return sendFromClient(request);
     if (request.method === "POST" && path === "/api/agent/heartbeat") return heartbeat(request);
     if (request.method === "POST" && path === "/api/agent/client/revoke") return revokeClient(request);
+    if (request.method === "GET" && path === "/api/agent/export") return exportClients(request);
     if (request.method === "POST" && path === "/api/agent/import") return importClients(request);
     if (request.method === "POST" && path === "/api/device/pair-code") return setPairCode(request);
     if (request.method === "POST" && path === "/api/pair") return legacyPair(request);

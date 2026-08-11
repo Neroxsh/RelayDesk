@@ -325,9 +325,9 @@ export default function Home() {
           }
         }
         localStorage.setItem(cursorKey(pairing.clientId), String(cursorRef.current));
-        schedule(document.visibilityState === "visible" ? 700 : 2_500);
+        schedule(document.visibilityState === "visible" ? 2_500 : 10_000);
       } catch {
-        schedule(2_500);
+        schedule(5_000);
       } finally {
         pollInFlight = false;
       }

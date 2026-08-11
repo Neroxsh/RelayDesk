@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFileSync, unlinkSync } from "node:fs";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -17,6 +18,7 @@ import { CONTROL_URL, openControlPanel, startControlServer } from "./control-ser
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
+const LOCK_PATH = path.join(CONFIG_DIR, "agent.lock");
 const command = process.argv[2] ?? "start";
 const DEFAULT_RELAY = "https://relay.xingshihao.site";
 const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -28,11 +30,57 @@ function argument(name) {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
-async function saveConfig(config) {
+let configWrite = Promise.resolve();
+
+function saveConfig(config) {
+  const snapshot = JSON.stringify(config, null, 2);
+  const temporary = `${CONFIG_PATH}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  configWrite = configWrite.catch(() => undefined).then(async () => {
+    await mkdir(CONFIG_DIR, { recursive: true });
+    try {
+      await writeFile(temporary, snapshot, { encoding: "utf8", mode: 0o600 });
+      await rename(temporary, CONFIG_PATH);
+    } finally {
+      await unlink(temporary).catch(() => undefined);
+    }
+  });
+  return configWrite;
+}
+
+function processIsRunning(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function acquireAgentLock() {
   await mkdir(CONFIG_DIR, { recursive: true });
-  const temporary = `${CONFIG_PATH}.tmp`;
-  await writeFile(temporary, JSON.stringify(config, null, 2), { encoding: "utf8", mode: 0o600 });
-  await rename(temporary, CONFIG_PATH);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await open(LOCK_PATH, "wx", 0o600);
+      await handle.writeFile(String(process.pid), "utf8");
+      await handle.close();
+      const release = () => {
+        try {
+          if (readFileSync(LOCK_PATH, "utf8").trim() === String(process.pid)) unlinkSync(LOCK_PATH);
+        } catch {
+          // The next launch removes a stale lock after an unclean shutdown.
+        }
+      };
+      process.once("exit", release);
+      return true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const owner = Number.parseInt(await readFile(LOCK_PATH, "utf8").catch(() => ""), 10);
+      if (processIsRunning(owner)) return false;
+      await unlink(LOCK_PATH).catch(() => undefined);
+    }
+  }
+  return false;
 }
 
 function createPairKey() {
@@ -158,6 +206,7 @@ let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
 let activeCodexSessionId = null;
 const SUBSCRIPTION_TTL = 45_000;
+const ACTIVE_CLIENT_TTL = 90_000;
 
 function messageSignature(message) {
   return `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`;
@@ -633,7 +682,13 @@ async function syncExternalChanges(config) {
   const signature = sessions.map((session) => `${session.key}:${Math.trunc(session.updatedAt)}`).join("|");
   if (signature === lastSessionSignature) return;
   lastSessionSignature = signature;
-  const clientIds = Object.keys(config.clients);
+  const current = Date.now();
+  const clientIds = Object.keys(config.clients).filter((clientId) => {
+    const activity = clientActivity.get(clientId);
+    const subscription = subscriptions.get(clientId);
+    return Number(activity?.lastRequestAt || 0) >= current - ACTIVE_CLIENT_TTL
+      || Number(subscription?.refreshedAt || 0) >= current - SUBSCRIPTION_TTL;
+  });
   await Promise.allSettled(
     clientIds.map((clientId) => send(config, clientId, { type: "sessions:snapshot", sessions })),
   );
@@ -652,6 +707,10 @@ async function syncExternalChanges(config) {
 }
 
 async function main() {
+  if (command === "start" && !(await acquireAgentLock())) {
+    console.log("RelayDesk is already running.");
+    return;
+  }
   const config = await loadConfig();
   configureSessionRoots({ codexHome: config.codexHome });
   for (const [clientId, client] of Object.entries(config.clients)) {
@@ -717,14 +776,14 @@ async function main() {
     }
   };
   void heartbeat();
-  setInterval(() => void heartbeat(), 10_000);
+  setInterval(() => void heartbeat(), 60_000);
 
-  let delay = 700;
+  let delay = 2_500;
   while (true) {
     try {
       await poll(config);
       await syncExternalChanges(config);
-      delay = 700;
+      delay = 2_500;
     } catch (error) {
       console.error(`连接暂时中断：${error instanceof Error ? error.message : error}`);
       delay = Math.min(12_000, Math.round(delay * 1.6));
