@@ -203,11 +203,12 @@ test("Codex capabilities come from the local app server", async () => {
   assert.match(setup, /Microsoft :: Windows|process\.platform === "win32"/);
 });
 
-test("the desktop agent is single-instance and Windows restarts it after failure", async () => {
-  const [agent, installer, runner, cli] = await Promise.all([
+test("the desktop agent is single-instance and Windows restarts it invisibly after failure", async () => {
+  const [agent, installer, runner, hiddenLauncher, cli] = await Promise.all([
     readFile(new URL("../agent/index.mjs", import.meta.url), "utf8"),
     readFile(new URL("../agent/install-agent.ps1", import.meta.url), "utf8"),
     readFile(new URL("../agent/run-agent.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../agent/run-agent-hidden.vbs", import.meta.url), "utf8"),
     readFile(new URL("../agent/cli.py", import.meta.url), "utf8"),
   ]);
   assert.match(agent, /acquireAgentLock/);
@@ -218,8 +219,13 @@ test("the desktop agent is single-instance and Windows restarts it after failure
   assert.match(installer, /-RepetitionInterval \(New-TimeSpan -Minutes 2\)/);
   assert.match(installer, /Remove-ItemProperty/);
   assert.match(installer, /run-agent\.ps1/);
+  assert.match(installer, /run-agent-hidden\.vbs/);
+  assert.match(installer, /System32\\wscript\.exe/);
+  assert.doesNotMatch(installer, /New-ScheduledTaskAction -Execute "powershell\.exe"/);
   assert.match(runner, /while \(\$true\)/);
   assert.match(runner, /restarting in 3 seconds/);
+  assert.match(hiddenLauncher, /shell\.Run\(command, 0, True\)/i);
+  assert.match(hiddenLauncher, /-NonInteractive -WindowStyle Hidden/);
   assert.match(cli, /install-agent\.ps1/);
 });
 

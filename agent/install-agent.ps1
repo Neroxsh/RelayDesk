@@ -16,13 +16,21 @@ $relay = $RelayUrl.TrimEnd("/")
 $node = (Resolve-Path -LiteralPath $NodePath).Path
 $agent = (Resolve-Path -LiteralPath $AgentPath).Path
 $runner = Join-Path (Split-Path -Parent $agent) "run-agent.ps1"
+$launcher = Join-Path (Split-Path -Parent $agent) "run-agent-hidden.vbs"
 
 if ($relay -notmatch "^https://" -and $relay -notmatch "^http://(127\.0\.0\.1|localhost)(:\d+)?$") {
   throw "Public relay URLs must use HTTPS."
 }
 
-$actionArguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -RelayUrl "{1}" -NodePath "{2}" -AgentPath "{3}"' -f $runner, $relay, $node, $agent
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArguments -WorkingDirectory (Split-Path -Parent $agent)
+if (-not (Test-Path -LiteralPath $runner) -or -not (Test-Path -LiteralPath $launcher)) {
+  throw "RelayDesk background launcher files are missing."
+}
+
+# wscript.exe is a windowless host. Starting the long-lived PowerShell watcher
+# through it prevents Windows Terminal from opening a visible console window.
+$wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+$actionArguments = '"{0}" -RelayUrl "{1}" -NodePath "{2}" -AgentPath "{3}"' -f $launcher, $relay, $node, $agent
+$action = New-ScheduledTaskAction -Execute $wscript -Argument $actionArguments -WorkingDirectory (Split-Path -Parent $agent)
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $healthTrigger = New-ScheduledTaskTrigger `
   -Once `
