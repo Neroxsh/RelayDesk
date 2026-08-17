@@ -10,7 +10,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$runner = Join-Path $PSScriptRoot "run-agent.ps1"
+$installer = Join-Path $projectRoot "agent\install-agent.ps1"
+$agent = Join-Path $projectRoot "agent\index.mjs"
 $relay = $RelayUrl.TrimEnd("/")
 
 if ($relay -notmatch "^https://" -and $relay -notmatch "^http://(127\.0\.0\.1|localhost)(:\d+)?$") {
@@ -26,20 +27,13 @@ if ($nodeMajor -lt 22) {
   throw "Node.js 22 or newer is required."
 }
 
-$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$startupCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runner`" -RelayUrl `"$relay`""
-Set-ItemProperty -Path $runKey -Name "RelayDeskAgent" -Value $startupCommand
-
-Set-Location -LiteralPath $projectRoot
-Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
-  "-NoProfile",
-  "-WindowStyle", "Hidden",
-  "-ExecutionPolicy", "Bypass",
-  "-File", $runner,
-  "-RelayUrl", $relay
-)
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer `
+  -RelayUrl $relay `
+  -NodePath (Get-Command node).Source `
+  -AgentPath $agent
 
 Start-Sleep -Seconds 2
+Set-Location -LiteralPath $projectRoot
 if (-not $NoControlPanel) {
   $controlArguments = @(".\agent\index.mjs", "control", "--relay", $relay)
   if ($SiteToken) {

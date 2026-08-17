@@ -29,4 +29,4 @@ relaydesk = "agent.cli:main"
 packages = ["agent"]
 
 [tool.setuptools.package-data]
-agent = ["*.mjs", "*.ps1", "*.html"]
+agent = ["*.mjs", "*.ps1", "*.vbs", "*.html"]

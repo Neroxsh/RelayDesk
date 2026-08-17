@@ -203,6 +203,32 @@ test("Codex capabilities come from the local app server", async () => {
   assert.match(setup, /Microsoft :: Windows|process\.platform === "win32"/);
 });
 
+test("the desktop agent is single-instance and Windows restarts it invisibly after failure", async () => {
+  const [agent, installer, runner, hiddenLauncher, cli] = await Promise.all([
+    readFile(new URL("../agent/index.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../agent/install-agent.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../agent/run-agent.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../agent/run-agent-hidden.vbs", import.meta.url), "utf8"),
+    readFile(new URL("../agent/cli.py", import.meta.url), "utf8"),
+  ]);
+  assert.match(agent, /acquireAgentLock/);
+  assert.match(agent, /configWrite = configWrite\.catch/);
+  assert.match(installer, /New-ScheduledTaskSettingsSet/);
+  assert.match(installer, /-RestartCount 999/);
+  assert.match(installer, /-MultipleInstances IgnoreNew/);
+  assert.match(installer, /-RepetitionInterval \(New-TimeSpan -Minutes 2\)/);
+  assert.match(installer, /Remove-ItemProperty/);
+  assert.match(installer, /run-agent\.ps1/);
+  assert.match(installer, /run-agent-hidden\.vbs/);
+  assert.match(installer, /System32\\wscript\.exe/);
+  assert.doesNotMatch(installer, /New-ScheduledTaskAction -Execute "powershell\.exe"/);
+  assert.match(runner, /while \(\$true\)/);
+  assert.match(runner, /restarting in 3 seconds/);
+  assert.match(hiddenLauncher, /shell\.Run\(command, 0, True\)/i);
+  assert.match(hiddenLauncher, /-NonInteractive -WindowStyle Hidden/);
+  assert.match(cli, /install-agent\.ps1/);
+});
+
 test("the desktop bridge never exposes an arbitrary shell endpoint", async () => {
   const [agent, providers] = await Promise.all([
     readFile(new URL("../agent/index.mjs", import.meta.url), "utf8"),
@@ -239,7 +265,7 @@ test("the mainland entry runs the RelayDesk API on strongly consistent storage",
   assert.match(proxy, /@edgeone\/pages-blob/);
   assert.match(proxy, /consistency: "strong"/);
   assert.match(proxy, /DEVICE_ONLINE_WINDOW = 120_000/);
-  assert.match(proxy, /PRESENCE_WRITE_INTERVAL = 15_000/);
+  assert.match(proxy, /PRESENCE_WRITE_INTERVAL = 60_000/);
   assert.match(proxy, /refreshAgentPresence\(agent, timestamp\)/);
   assert.match(proxy, /messages-v2/);
   assert.match(proxy, /MESSAGE_ID_CEILING - id/);
@@ -248,8 +274,30 @@ test("the mainland entry runs the RelayDesk API on strongly consistent storage",
   assert.match(proxy, /requestNonce/);
   assert.match(proxy, /path === "\/api\/client\/send"/);
   assert.match(proxy, /path === "\/api\/agent\/import"/);
+  assert.match(proxy, /path === "\/api\/agent\/export"/);
   assert.doesNotMatch(proxy, /chatgpt\.site/);
   assert.match(prepare, /missingAssets/);
   assert.match(prepare, /builtManifest/);
   assert.equal(JSON.parse(pkg).scripts["build:edgeone"].includes("prepare-edgeone.mjs"), true);
+});
+
+test("the realtime relay bounds and acknowledges its encrypted message queues", async () => {
+  const [store, agentPoll, clientPoll, agentSend, clientSend, agent] = await Promise.all([
+    readFile(new URL("../app/api/_lib/store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/agent/poll/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/client/poll/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/agent/send/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/client/send/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../agent/index.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(store, /MESSAGE_RETENTION_PER_TARGET = 30/);
+  assert.match(store, /MESSAGE_RETENTION_MS = 24 \* 60 \* 60_000/);
+  assert.match(store, /DELETE FROM messages WHERE target_id = \? AND id <= \?/);
+  assert.match(store, /LIMIT 1 OFFSET \?/);
+  assert.match(agentPoll, /deleteDeliveredMessages\(`agent:/);
+  assert.match(clientPoll, /deleteDeliveredMessages\(`client:/);
+  assert.match(agentSend, /pruneMessageQueue\(targetId, timestamp\)/);
+  assert.match(clientSend, /pruneMessageQueue\(targetId, timestamp\)/);
+  assert.match(agent, /ACTIVE_CLIENT_TTL = 90_000/);
+  assert.match(agent, /lastRequestAt/);
 });

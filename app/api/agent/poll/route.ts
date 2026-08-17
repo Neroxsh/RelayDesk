@@ -1,4 +1,4 @@
-import { authenticateAgent, jsonError, now, store } from "../../_lib/store";
+import { authenticateAgent, deleteDeliveredMessages, jsonError, store, touchDevicePresence } from "../../_lib/store";
 
 export async function GET(request: Request) {
   const agent = await authenticateAgent(request);
@@ -6,7 +6,8 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const after = Math.max(0, Number.parseInt(url.searchParams.get("after") ?? "0", 10) || 0);
   const db = store();
-  await db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").bind(now(), agent.id).run();
+  await touchDevicePresence(agent.id);
+  await deleteDeliveredMessages(`agent:${agent.id}`, after);
   const rows = await db
     .prepare("SELECT id, sender_id, kind, envelope, created_at FROM messages WHERE target_id = ? AND id > ? ORDER BY id ASC LIMIT 100")
     .bind(`agent:${agent.id}`, after)

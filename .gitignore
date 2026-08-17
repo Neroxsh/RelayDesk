@@ -41,6 +41,7 @@ next-env.d.ts
 /edgeone-dist/
 /edgeone/node_modules/
 /.wrangler/
+/wrangler.production.jsonc
 /outputs/
 /work/
 /.venv/

@@ -15,9 +15,6 @@ import webbrowser
 
 DEFAULT_RELAY = "https://relay.xingshihao.site"
 CONTROL_URL = "http://127.0.0.1:43127"
-RUN_VALUE = "RelayDeskAgent"
-
-
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="relaydesk", description="Run the RelayDesk desktop bridge")
     result.add_argument(
@@ -40,18 +37,18 @@ def online() -> bool:
         return False
 
 
-def startup_command(node: str, agent: Path, relay: str) -> str:
-    return f'"{node}" "{agent}" start --relay "{relay}"'
-
-
-def install_startup(command: str) -> None:
+def install_startup(node: str, agent: Path, relay: str) -> None:
     if sys.platform != "win32":
         return
-    import winreg
-
-    path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as key:
-        winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, command)
+    installer = Path(__file__).with_name("install-agent.ps1")
+    subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(installer), "-RelayUrl", relay,
+            "-NodePath", node, "-AgentPath", str(agent),
+        ],
+        check=True,
+    )
 
 
 def start_background(node: str, agent: Path, relay: str) -> None:
@@ -100,8 +97,8 @@ def main() -> int:
         return 0 if online() else 1
     if args.command == "setup":
         if sys.platform == "win32":
-            install_startup(startup_command(node, agent, relay))
-        if not online():
+            install_startup(node, agent, relay)
+        elif not online():
             start_background(node, agent, relay)
             for _ in range(40):
                 if online():
