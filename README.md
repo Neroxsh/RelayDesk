@@ -37,9 +37,8 @@
 </p>
 
 <p align="center">
-  <strong>▶ 点击画面播放 39 秒完整宣传片</strong>
+ 
   <br>
-  <sub>真实手机界面 · H.264 · 1.64 MB</sub>
 </p>
 
 ---
