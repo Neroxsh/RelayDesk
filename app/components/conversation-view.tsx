@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { formatMessageTime, providerName } from "../relaydesk-meta";
 import type { DeviceStatus, Message, RunSettings, SessionDetail, SessionSummary } from "../relaydesk-types";
+import { ProviderIcon } from "./provider-icon";
 
 type ConversationViewProps = {
   session: SessionSummary;
@@ -85,7 +86,7 @@ export function ConversationView({
         <button className="back-button" type="button" onClick={onBack} aria-label="返回会话列表"><ArrowLeft size={21} /></button>
         <div className="conversation-heading">
           <strong>{session.currentWindow ? "继续上次会话" : session.title}</strong>
-          <span><i className={`provider-dot ${session.provider}`} />{providerName(session.provider)}</span>
+          <span><ProviderIcon provider={session.provider} size={15} />{providerName(session.provider)}</span>
         </div>
         {isWorking && supportsStop && !session.currentWindow ? (
           <button className="stop-button" type="button" onClick={onStop}><CircleStop size={15} /><span>停止</span></button>
@@ -136,7 +137,7 @@ export function ConversationView({
 
         {isWorking ? (
           <div className="reply-pulse" role="status" aria-live="polite">
-            <span className={`provider-dot ${session.provider}`} />
+            <ProviderIcon provider={session.provider} size={18} />
             <span className="reply-pulse-dots" aria-hidden="true"><i /><i /><i /></span>
             <p>{deliveryCopy}</p>
           </div>
@@ -177,7 +178,7 @@ export function ConversationView({
 export function EmptyConversation({ provider }: { provider: SessionSummary["provider"] }) {
   return (
     <section className="conversation-panel empty">
-      <div className="conversation-empty"><span className={`provider-dot ${provider}`} /><h2>{providerName(provider)}</h2><p>选择一个会话继续。</p></div>
+      <div className="conversation-empty"><ProviderIcon provider={provider} size={40} /><h2>{providerName(provider)}</h2><p>选择一个会话继续。</p></div>
     </section>
   );
 }

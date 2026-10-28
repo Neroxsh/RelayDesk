@@ -17,6 +17,7 @@ import {
 import { formatWhen, providerName } from "../relaydesk-meta";
 import type { ClaudeStatus, Provider, CodexStatus, DeviceStatus, ProjectGroup, SessionSummary, StoredPairing } from "../relaydesk-types";
 import { SessionLoader } from "./session-loader";
+import { ProviderIcon } from "./provider-icon";
 
 type SessionBrowserProps = {
   sessionCount: number;
@@ -78,10 +79,10 @@ export function SessionBrowser({
         <button className="icon-button" type="button" onClick={onForgetPhone} aria-label="连接管理" title="连接管理"><MoreHorizontal size={19} /></button>
       </header>
 
-      <div className="assistant-tabs" aria-label="选择助手">{(["codex", "claude"] as const).map((item) => <button type="button" key={item} className={provider === item ? "active" : ""} onClick={() => onProviderChange(item)}>{providerName(item)}</button>)}</div>
+      <div className="assistant-tabs" aria-label="选择助手">{(["codex", "claude"] as const).map((item) => <button type="button" key={item} className={provider === item ? "active" : ""} onClick={() => onProviderChange(item)}><ProviderIcon provider={item} size={20} />{providerName(item)}</button>)}</div>
 
       <button className="codex-overview" type="button" onClick={onOpenSettings}>
-        <span className="codex-mark">{provider === "claude" ? "A" : "C"}</span>
+        <ProviderIcon provider={provider} size={34} />
         <span><strong>{providerName(provider)}</strong><small>{provider === "claude" ? claudeStatus?.ccSwitch.providers.find((item) => item.current)?.name || claudeStatus?.version || "检测中" : defaultModel?.displayName ?? status?.defaultSettings?.model ?? "正在读取模型"} · {sessionCount} 个会话</small></span>
         {provider === "codex" ? typeof used === "number" ? <i title="短周期剩余额度">余 {Math.max(0, Math.round(100 - used))}%</i> : <i>读取中</i> : <i>设置</i>}
         <Settings2 size={17} />

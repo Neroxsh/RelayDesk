@@ -2,6 +2,7 @@
 
 import { Check, ChevronRight, Gauge, LockKeyhole, Shield, Sparkles, X, Zap } from "lucide-react";
 import type { CodexStatus, PermissionMode, RunSettings } from "../relaydesk-types";
+import { ProviderIcon } from "./provider-icon";
 
 type CodexSettingsProps = {
   status: CodexStatus | null;
@@ -67,7 +68,7 @@ export function CodexSettings({ status, settings, currentWindow, customized, err
     <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="settings-sheet" role="dialog" aria-modal="true" aria-label="Codex 设置">
         <header className="settings-header">
-          <div><span>Codex</span><h2>运行设置</h2></div>
+          <div><span className="settings-brand"><ProviderIcon provider="codex" size={18} />Codex</span><h2>运行设置</h2></div>
           <div className="settings-header-actions"><button type="button" onClick={onRefresh}>刷新状态</button><button type="button" onClick={onClose} aria-label="关闭"><X size={20} /></button></div>
         </header>
 

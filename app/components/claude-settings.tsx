@@ -1,6 +1,7 @@
 "use client";
 import { X } from "lucide-react";
 import type { ClaudeStatus, RunSettings, SessionDetail } from "../relaydesk-types";
+import { ProviderIcon } from "./provider-icon";
 
 export function ClaudeSettings({ status, settings, customized, detail, switching, onChange, onClose, onRefresh, onFollow, onSwitch }: {
   status: ClaudeStatus | null; settings: RunSettings; customized: boolean; detail?: SessionDetail | null; switching: boolean;
@@ -10,7 +11,7 @@ export function ClaudeSettings({ status, settings, customized, detail, switching
   if (settings.model && !models.some((model) => model.model === settings.model)) models.unshift({ id: settings.model, model: settings.model, displayName: settings.model });
   return <div className="settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="settings-sheet" role="dialog" aria-modal="true" aria-label="Claude Code 设置">
-      <header className="settings-header"><div><span>Claude Code · {status?.version || "检测中"}</span><h2>运行设置</h2></div><div className="settings-header-actions"><button onClick={onRefresh}>刷新状态</button><button onClick={onClose} aria-label="关闭"><X size={20} /></button></div></header>
+      <header className="settings-header"><div><span className="settings-brand"><ProviderIcon provider="claude" size={18} />Claude Code · {status?.version || "检测中"}</span><h2>运行设置</h2></div><div className="settings-header-actions"><button onClick={onRefresh}>刷新状态</button><button onClick={onClose} aria-label="关闭"><X size={20} /></button></div></header>
       {!status?.canSend ? <p className="settings-notice">{status?.available ? "这个版本缺少所需命令行接口，请升级后发送。历史仍可查看。" : "未检测到可用的 Claude Code，请先在电脑安装并配置。"}</p> : null}
       <div className="settings-notice settings-source"><span>{customized ? "以下设置将在下一条手机消息生效。" : "下一条消息跟随电脑当前 Claude 全局配置。"}</span>{customized ? <button onClick={onFollow}>跟随电脑</button> : null}</div>
       {detail?.settings?.model ? <p className="status-freshness">本会话上一轮实际模型：{detail.settings.model}</p> : null}
