@@ -1,5 +1,5 @@
 import { readFileSync, unlinkSync } from "node:fs";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -15,6 +15,9 @@ import {
 import { openCodexSession, sendPrompt, sendToCodexSession, sendToCurrentCodex } from "./providers.mjs";
 import { getCodexStatus } from "./codex-status.mjs";
 import { CONTROL_URL, openControlPanel, startControlServer } from "./control-server.mjs";
+import { mergeTimelineMessages } from "../shared/messages.mjs";
+import { writeAtomicJson } from "./persistence.mjs";
+import { RequestLedger } from "./request-ledger.mjs";
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
@@ -33,17 +36,8 @@ function argument(name) {
 let configWrite = Promise.resolve();
 
 function saveConfig(config) {
-  const snapshot = JSON.stringify(config, null, 2);
-  const temporary = `${CONFIG_PATH}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  configWrite = configWrite.catch(() => undefined).then(async () => {
-    await mkdir(CONFIG_DIR, { recursive: true });
-    try {
-      await writeFile(temporary, snapshot, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, CONFIG_PATH);
-    } finally {
-      await unlink(temporary).catch(() => undefined);
-    }
-  });
+  const snapshot = JSON.parse(JSON.stringify(config));
+  configWrite = configWrite.catch(() => undefined).then(() => writeAtomicJson(CONFIG_PATH, snapshot, { backup: true }));
   return configWrite;
 }
 
@@ -98,7 +92,15 @@ async function loadConfig() {
   try {
     config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
   } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
+    if (error?.code !== "ENOENT") {
+      try {
+        const recovered = JSON.parse(await readFile(`${CONFIG_PATH}.bak`, "utf8"));
+        if (!recovered.deviceId || !recovered.keys?.privateKey || !recovered.agentToken) throw new Error("备份无效");
+        await writeAtomicJson(CONFIG_PATH, recovered);
+        console.error("配置损坏，已从有效备份恢复设备身份和手机绑定。");
+        return recovered;
+      } catch { throw new Error("设备配置和备份不可读，请在电脑端恢复配置；不会自动清除手机绑定。"); }
+    }
     const keys = await generateDeviceKeys();
     config = {
       version: 2,
@@ -121,7 +123,8 @@ async function loadConfig() {
   if (!config.pendingPairs) { config.pendingPairs = {}; changed = true; }
   if (!config.clients) { config.clients = {}; changed = true; }
   if (config.version !== 2) { config.version = 2; changed = true; }
-  if (changed || !config.createdAt) await saveConfig(config);
+  if (!config.createdAt) { config.createdAt = Date.now(); changed = true; }
+  if (changed) await saveConfig(config);
   return config;
 }
 
@@ -142,7 +145,7 @@ async function request(config, pathname, options = {}) {
   const response = await fetch(`${config.relayUrl}${pathname}`, {
     ...fetchOptions,
     headers,
-    signal: options.signal ?? AbortSignal.timeout(10_000),
+    signal: options.signal ?? AbortSignal.timeout(15_000),
   });
   const status = response.status;
   const responseBody = await response.text();
@@ -151,8 +154,13 @@ async function request(config, pathname, options = {}) {
     data = responseBody ? JSON.parse(responseBody) : {};
   } catch {
     // Preserve a useful status error when a gateway returns HTML.
+    if (status >= 200 && status < 300) throw new Error("中继返回了无效响应，正在重新连接");
   }
-  if (status < 200 || status >= 300) throw new Error(data.error ?? `中继服务返回 ${status}`);
+  if (status < 200 || status >= 300) {
+    const error = new Error(data.error ?? `中继服务返回 ${status}`);
+    error.status = status;
+    throw error;
+  }
   return data;
 }
 
@@ -185,10 +193,11 @@ async function clientKey(config, clientId) {
 
 async function send(config, clientId, payload) {
   const key = await clientKey(config, clientId);
-  const envelope = await encryptJson(key, payload);
+  const delivery = { eventId: randomToken(12), at: Date.now(), ...payload };
+  const envelope = await encryptJson(key, delivery);
   await request(config, "/api/agent/send", {
     method: "POST",
-    body: JSON.stringify({ clientId, envelope }),
+    body: JSON.stringify({ clientId, envelope, deliveryId: delivery.eventId }),
   });
   const previous = clientActivity.get(clientId) ?? {};
   clientActivity.set(clientId, {
@@ -201,16 +210,12 @@ async function send(config, clientId, payload) {
 const activeRuns = new Map();
 const subscriptions = new Map();
 const stableSnapshots = new Map();
-const handledRequests = new Map();
+const handledRequests = new RequestLedger(path.join(CONFIG_DIR, "requests.json"));
 let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
 let activeCodexSessionId = null;
 const SUBSCRIPTION_TTL = 45_000;
 const ACTIVE_CLIENT_TTL = 90_000;
-
-function messageSignature(message) {
-  return `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`;
-}
 
 function stableSessionSnapshot(session) {
   const previous = stableSnapshots.get(session.key);
@@ -223,15 +228,8 @@ function stableSessionSnapshot(session) {
     stableSnapshots.set(session.key, session);
     return session;
   }
-  const messages = [...(previous.messages ?? [])];
-  const seen = new Set(messages.map(messageSignature));
-  for (const message of session.messages ?? []) {
-    const signature = messageSignature(message);
-    if (seen.has(signature)) continue;
-    seen.add(signature);
-    messages.push(message);
-  }
-  const merged = { ...previous, ...session, messages: messages.slice(-240) };
+  const messages = mergeTimelineMessages(previous.messages ?? [], session.messages ?? []);
+  const merged = { ...previous, ...session, messages };
   stableSnapshots.set(session.key, merged);
   return merged;
 }
@@ -252,10 +250,11 @@ function userFacingError(error) {
 }
 
 async function sendBestEffort(config, clientId, payload) {
+  const delivery = { eventId: randomToken(12), at: Date.now(), ...payload };
   let lastError;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      await send(config, clientId, payload);
+      await send(config, clientId, delivery);
       return true;
     } catch (error) {
       lastError = error;
@@ -266,31 +265,26 @@ async function sendBestEffort(config, clientId, payload) {
   return false;
 }
 
-function claimMutatingRequest(clientId, payload) {
-  if (!["session:activate", "session:send", "session:stop"].includes(payload?.type) || !payload?.requestId) return true;
-  const current = Date.now();
-  if (handledRequests.size > 200) {
-    for (const [key, record] of handledRequests) {
-      if (record.expiresAt <= current) handledRequests.delete(key);
-    }
-  }
-  const key = `${clientId}:${payload.requestId}`;
-  const existing = handledRequests.get(key);
-  if (existing?.expiresAt > current) return { claimed: false, response: existing.response ?? null };
-  handledRequests.set(key, { expiresAt: current + 10 * 60_000, response: null });
-  return { claimed: true, response: null };
+async function claimMutatingRequest(clientId, payload) {
+  return handledRequests.claim(clientId, payload);
 }
 
-function rememberRequestResponse(clientId, requestId, response) {
+async function rememberRequestResponse(clientId, requestId, response) {
   if (!requestId) return;
-  const key = `${clientId}:${requestId}`;
-  const existing = handledRequests.get(key);
-  if (!existing) return;
-  handledRequests.set(key, { ...existing, response, expiresAt: Date.now() + 10 * 60_000 });
+  await handledRequests.remember(clientId, requestId, response);
 }
 
 async function sendRequestResponse(config, clientId, requestId, response) {
-  rememberRequestResponse(clientId, requestId, response);
+  response = { ...response, at: Date.now() };
+  await rememberRequestResponse(clientId, requestId, response);
+  if (response.type === "run:status" || response.type === "request:error") {
+    const activity = clientActivity.get(clientId) ?? {};
+    clientActivity.set(clientId, {
+      ...activity,
+      lastRun: { requestId, sessionKey: response.sessionKey, status: response.status ?? "failed", error: response.error, at: Date.now() },
+    });
+    if (response.error) console.error(`[${new Date().toISOString()}] 任务发送失败：${response.error}`);
+  }
   return sendBestEffort(config, clientId, response);
 }
 
@@ -312,7 +306,7 @@ async function publicSessions() {
     id: "__current__",
     key: "codex:__current__",
     provider: "codex",
-    title: "当前 Codex 窗口",
+    title: "继续上次会话",
     cwd: currentCodex?.cwd ?? "",
     projectName: "当前窗口",
     updatedAt: currentCodex?.updatedAt ?? Date.now(),
@@ -334,7 +328,7 @@ async function currentCodexDetail() {
     id: "__current__",
     key: "codex:__current__",
     provider: "codex",
-    title: "当前 Codex 窗口",
+    title: "继续上次会话",
     currentWindow: true,
     sourceSessionId: current?.id ?? null,
   };
@@ -396,21 +390,28 @@ async function handleCommand(config, clientId, payload) {
       await send(config, clientId, { type: "pong", requestId, at: Date.now() });
       return;
     }
+    if (payload?.type === "request:status") {
+      const saved = handledRequests.get(clientId, String(payload.originalRequestId ?? ""));
+      await sendBestEffort(config, clientId, saved ?? {
+        type: "request:unknown", requestId: payload.originalRequestId, sessionKey: payload.sessionKey,
+      });
+      return;
+    }
     if (payload?.type === "codex:status:get") {
       const status = await getCodexStatus(Boolean(payload.refresh));
       await send(config, clientId, { type: "codex:status", requestId, status });
       return;
     }
     if (payload?.type === "sessions:list") {
-      await sendBestEffort(config, clientId, { type: "sessions:loading", requestId, progress: 12, label: "正在读取 Codex 会话" });
+      if (!payload.background) await sendBestEffort(config, clientId, { type: "sessions:loading", requestId, progress: 12, label: "正在读取 Codex 会话" });
       const sessions = await publicSessions();
-      await sendBestEffort(config, clientId, { type: "sessions:loading", requestId, progress: 86, label: "正在整理项目" });
+      if (!payload.background) await sendBestEffort(config, clientId, { type: "sessions:loading", requestId, progress: 86, label: "正在整理项目" });
       await send(config, clientId, { type: "sessions:snapshot", requestId, sessions });
       void getCodexStatus().then((status) => sendBestEffort(config, clientId, {
         type: "codex:status",
         requestId,
         status,
-      })).catch(() => undefined);
+      })).catch((error) => sendBestEffort(config, clientId, { type: "codex:status:error", error: userFacingError(error) }));
       return;
     }
     if (["session:get", "session:watch"].includes(payload?.type)) {
@@ -441,6 +442,7 @@ async function handleCommand(config, clientId, payload) {
       const key = `${payload.provider}:${payload.sessionId}`;
       const run = activeRuns.get(key);
       if (!run) throw new Error("这个会话当前没有正在执行的任务");
+      if (run.supportsStop === false) throw new Error("桌面会话接口暂不支持中断任务，请在 Codex 电脑端停止");
       run.stop();
       await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "stopping" });
       return;
@@ -450,15 +452,29 @@ async function handleCommand(config, clientId, payload) {
       if (!prompt || prompt.length > 12_000) throw new Error("指令需为 1–12000 个字符");
       if (payload.provider !== "codex") throw new Error("当前版本仅支持 Codex");
       const settings = runSettings(payload);
+      if (process.platform === "win32" && payload.settings) {
+        const status = await getCodexStatus();
+        const model = status.models.find((item) => item.model === settings.model);
+        if (settings.model && !model) throw new Error("电脑当前不支持所选模型，请刷新模型列表");
+        if (settings.reasoning && model && !model.supportedReasoningEfforts.some((effort) => effort.reasoningEffort === settings.reasoning)) throw new Error("这个模型不支持所选思考强度");
+      }
+      const sentAt = Date.now();
+      const desktopOptions = (sessionId) => ({
+        settings: payload.settings ? settings : {},
+        async confirmDelivery() {
+          const detail = await getSession("codex", sessionId);
+          return detail.messages.some((message) => message.role === "user" && message.content === prompt && Date.parse(message.timestamp ?? "") >= sentAt - 2_000);
+        },
+      });
       if (payload.provider === "codex" && payload.sessionId === "__current__") {
         const key = "codex:__current__";
         await watchSession(config, clientId, { key, provider: "codex", id: "__current__" });
         if (activeRuns.has(key)) throw new Error("正在把上一条指令发送到 Codex");
-        const current = process.platform === "win32" ? null : await currentCodexDetail();
+        const current = await currentCodexDetail();
         const source = current?.sourceSessionId ? await getSession("codex", current.sourceSessionId) : null;
-        if (process.platform !== "win32" && !source) throw new Error("还没有可继续的 Codex 会话");
+        if (!source) throw new Error("还没有可继续的 Codex 会话");
         const run = process.platform === "win32"
-          ? sendToCurrentCodex(prompt)
+          ? sendToCurrentCodex(prompt, source.id, desktopOptions(source.id))
           : sendPrompt(source, prompt, settings, (event) => {
             void send(config, clientId, { type: "run:event", requestId, sessionKey: key, event, at: Date.now() }).catch(() => undefined);
           });
@@ -477,7 +493,7 @@ async function handleCommand(config, clientId, payload) {
             type: "run:status",
             requestId,
             sessionKey: key,
-            status: "failed",
+            status: error?.code === "DELIVERY_UNCERTAIN" ? "uncertain" : "failed",
             error: userFacingError(error),
           });
           return;
@@ -493,7 +509,7 @@ async function handleCommand(config, clientId, payload) {
       await watchSession(config, clientId, session);
       if (activeRuns.has(key)) throw new Error("这个会话仍在执行，请等待或先停止");
       activeCodexSessionId = session.id;
-      const managed = process.platform !== "win32" || payload.execution === "managed";
+      const managed = process.platform !== "win32";
       const run = managed
         ? sendPrompt(session, prompt, settings, (event) => {
           void send(config, clientId, {
@@ -504,19 +520,19 @@ async function handleCommand(config, clientId, payload) {
             at: Date.now(),
           }).catch(() => undefined);
         })
-        : sendToCodexSession(session.id, prompt);
+        : sendToCodexSession(session.id, prompt, desktopOptions(session.id));
       activeRuns.set(key, run);
       void sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "running", mode: managed ? "managed" : "window" });
       try {
         await run.completed;
         invalidateSessions();
-        await sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "completed" });
+        await sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: managed ? "completed" : "submitted" });
       } catch (error) {
         await sendRequestResponse(config, clientId, requestId, {
           type: "run:status",
           requestId,
           sessionKey: key,
-          status: "failed",
+          status: error?.code === "DELIVERY_UNCERTAIN" ? "uncertain" : "failed",
           error: userFacingError(error),
         });
       } finally {
@@ -576,11 +592,12 @@ async function poll(config) {
     try {
       const envelope = JSON.parse(message.envelope);
       const payload = await decryptJson(await clientKey(config, clientId), envelope);
-      const claim = claimMutatingRequest(clientId, payload);
+      const claim = await claimMutatingRequest(clientId, payload);
       if (claim !== true && !claim.claimed) {
         if (claim.response) void sendBestEffort(config, clientId, claim.response);
         continue;
       }
+      if (claim?.response) void sendBestEffort(config, clientId, claim.response);
       void handleCommand(config, clientId, payload).catch((error) => {
         console.error(`手机请求处理失败：${error instanceof Error ? error.message : error}`);
       });
@@ -589,6 +606,7 @@ async function poll(config) {
     }
   }
   if (config.cursor !== startingCursor) await saveConfig(config);
+  return (data.messages ?? []).length;
 }
 
 async function controlState(config) {
@@ -712,6 +730,7 @@ async function main() {
     return;
   }
   const config = await loadConfig();
+  await handledRequests.load();
   configureSessionRoots({ codexHome: config.codexHome });
   for (const [clientId, client] of Object.entries(config.clients)) {
     if (client.watch?.key && client.watch?.provider && client.watch?.sessionId) {
@@ -728,7 +747,6 @@ async function main() {
   const siteToken = argument("site-token") ?? process.env.RELAYDESK_SITE_TOKEN ?? config.siteToken;
   if (siteToken) config.siteToken = siteToken;
   await saveConfig(config);
-  await register(config);
 
   if (command === "pair" || command === "control") {
     console.log(`\n永久连接密钥：${config.pairKey}\n电脑控制中心：${CONTROL_URL}\n`);
@@ -741,7 +759,7 @@ async function main() {
     return;
   }
 
-  console.log(`RelayDesk 已连接：${config.deviceName}`);
+  console.log(`RelayDesk 已启动：${config.deviceName}`);
   await startControlServer({
     controlToken: config.controlToken,
     getState: async () => controlState(config),
@@ -752,9 +770,26 @@ async function main() {
   });
   console.log(`电脑控制中心：${CONTROL_URL}`);
 
+  let registered = false;
+  let syncing = false;
+  setInterval(() => {
+    if (!registered || syncing) return;
+    syncing = true;
+    void syncExternalChanges(config).catch((error) => console.error(`同步暂时中断：${userFacingError(error)}`)).finally(() => { syncing = false; });
+  }, 1_500);
+  let refreshingStatus = false;
+  setInterval(() => {
+    if (!registered || refreshingStatus) return;
+    const clients = Object.keys(config.clients).filter((id) => Date.now() - (clientActivity.get(id)?.lastRequestAt ?? 0) < ACTIVE_CLIENT_TTL);
+    if (!clients.length) return;
+    refreshingStatus = true;
+    void getCodexStatus(true).then((status) => Promise.allSettled(clients.map((id) => sendBestEffort(config, id, { type: "codex:status", status }))))
+      .catch(() => undefined).finally(() => { refreshingStatus = false; });
+  }, 60_000);
+
   let heartbeatInFlight = false;
   const heartbeat = async () => {
-    if (heartbeatInFlight) return;
+    if (heartbeatInFlight || !registered) return;
     heartbeatInFlight = true;
     let lastError;
     try {
@@ -781,10 +816,12 @@ async function main() {
   let delay = 2_500;
   while (true) {
     try {
-      await poll(config);
-      await syncExternalChanges(config);
-      delay = 2_500;
+      if (!registered) { await register(config); registered = true; console.log("RelayDesk 已连接中继。"); void heartbeat(); }
+      const count = await poll(config);
+      const active = [...clientActivity.values()].some((item) => Date.now() - (item.lastRequestAt ?? 0) < ACTIVE_CLIENT_TTL);
+      delay = count > 0 ? 100 : active ? 1_000 : 2_500;
     } catch (error) {
+      if (error?.status === 401) registered = false;
       console.error(`连接暂时中断：${error instanceof Error ? error.message : error}`);
       delay = Math.min(12_000, Math.round(delay * 1.6));
     }

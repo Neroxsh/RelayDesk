@@ -8,6 +8,7 @@ type CodexSettingsProps = {
   settings: RunSettings;
   currentWindow: boolean;
   customized: boolean;
+  error?: string;
   onChange: (settings: RunSettings) => void;
   onClose: () => void;
   onRefresh: () => void;
@@ -40,11 +41,12 @@ function compactNumber(value: number) {
   return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
-export function CodexSettings({ status, settings, currentWindow, customized, onChange, onClose, onRefresh, onUseDesktopSettings }: CodexSettingsProps) {
+export function CodexSettings({ status, settings, currentWindow, customized, error, onChange, onClose, onRefresh, onUseDesktopSettings }: CodexSettingsProps) {
   const models = status?.models ?? [];
-  const selectedModel = models.find((model) => model.model === settings.model) ?? models.find((model) => model.isDefault) ?? models[0];
+  const selectedModel = models.find((model) => model.model === settings.model);
   const efforts = selectedModel?.supportedReasoningEfforts ?? [];
   const primary = status?.usage.primary;
+  const secondary = status?.usage.secondary;
   const activity = status?.usage.activity;
   const today = activity?.daily.at(-1);
   const remaining = Math.max(0, Math.round(100 - (primary?.usedPercent ?? 0)));
@@ -55,7 +57,8 @@ export function CodexSettings({ status, settings, currentWindow, customized, onC
     onChange({
       ...settings,
       model: model.model,
-      reasoning: model.defaultReasoningEffort ?? model.supportedReasoningEfforts[0]?.reasoningEffort ?? "",
+      reasoning: model.supportedReasoningEfforts.some((effort) => effort.reasoningEffort === settings.reasoning)
+        ? settings.reasoning : model.defaultReasoningEffort ?? model.supportedReasoningEfforts[0]?.reasoningEffort ?? "",
       serviceTier: "",
     });
   };
@@ -65,17 +68,22 @@ export function CodexSettings({ status, settings, currentWindow, customized, onC
       <section className="settings-sheet" role="dialog" aria-modal="true" aria-label="Codex 设置">
         <header className="settings-header">
           <div><span>Codex</span><h2>运行设置</h2></div>
-          <button type="button" onClick={onClose} aria-label="关闭"><X size={20} /></button>
+          <div className="settings-header-actions"><button type="button" onClick={onRefresh}>刷新状态</button><button type="button" onClick={onClose} aria-label="关闭"><X size={20} /></button></div>
         </header>
 
         {primary ? (
           <button className="usage-card" type="button" onClick={onRefresh}>
             <Gauge size={20} />
-            <span><b>本期可用 {remaining}%</b><small>{resetText(primary.resetsAt)} · {status?.usage.planType?.toUpperCase()}</small></span>
+            <span><b>{primary.windowDurationMins ? `${primary.windowDurationMins / 60} 小时` : "短周期"}可用 {remaining}%</b><small>{resetText(primary.resetsAt)} · {status?.usage.planType?.toUpperCase()}</small></span>
             <i><em style={{ width: `${remaining}%` }} /></i>
             <ChevronRight size={16} />
           </button>
-        ) : null}
+        ) : <button className="usage-unavailable" type="button" onClick={onRefresh}>用量暂不可用 · 点击重新读取</button>}
+        {secondary ? <button className="usage-card secondary-usage" type="button" onClick={onRefresh}>
+          <Gauge size={20} /><span><b>{secondary.windowDurationMins >= 10080 ? "本周" : "长周期"}可用 {Math.round(100 - secondary.usedPercent)}%</b><small>{resetText(secondary.resetsAt)}</small></span>
+          <i><em style={{ width: `${Math.round(100 - secondary.usedPercent)}%` }} /></i><ChevronRight size={16} />
+        </button> : null}
+        <p className="status-freshness">{status?.stale ? "当前为上次成功同步的数据" : status?.updatedAt ? `同步于 ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(status.updatedAt)}` : "正在读取电脑状态"}{error ? ` · ${error}` : ""}</p>
 
         {activity ? (
           <div className="usage-summary" aria-label="Codex 使用统计">
@@ -85,9 +93,9 @@ export function CodexSettings({ status, settings, currentWindow, customized, onC
           </div>
         ) : null}
 
-        {currentWindow ? <p className="settings-notice">当前窗口沿用电脑端已选择的模型和权限；以下设置用于项目会话。</p> : (
+        {status?.desktopSettingsOnly || currentWindow ? <div className="settings-notice settings-source"><span>{customized ? "模型和思考强度将在下一条消息生效，仍继续电脑上的原会话。" : "模型和思考强度来自当前电脑会话；可在这里调整下一条消息。"} 权限沿用电脑。</span>{customized ? <button type="button" onClick={onUseDesktopSettings}>跟随电脑</button> : null}</div> : (
           <div className="settings-notice settings-source">
-            <span>{customized ? "自定义设置已启用，任务会由电脑后台继续。" : "当前沿用 Codex 电脑端的设置。"}</span>
+            <span>{customized ? "自定义设置将在下一条消息生效。" : "当前沿用 Codex 电脑端的设置。"}</span>
             {customized ? <button type="button" onClick={onUseDesktopSettings}>改回电脑端</button> : null}
           </div>
         )}
@@ -118,7 +126,7 @@ export function CodexSettings({ status, settings, currentWindow, customized, onC
           </div>
         ) : null}
 
-        <div className="settings-section">
+        {!status?.desktopSettingsOnly ? <div className="settings-section">
           <label>权限范围</label>
           <div className="permission-options">
             {PERMISSIONS.map((permission) => {
@@ -130,7 +138,7 @@ export function CodexSettings({ status, settings, currentWindow, customized, onC
               );
             })}
           </div>
-        </div>
+        </div> : <p className="settings-notice">当前电脑权限：{settings.permission === "full" ? "完全访问" : settings.permission === "read-only" ? "只读" : "工作区"}。调整权限请在电脑端操作。</p>}
 
         {serviceTier ? (
           <div className="settings-section">

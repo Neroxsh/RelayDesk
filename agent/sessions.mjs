@@ -1,6 +1,8 @@
 import { open, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { createHash } from "node:crypto";
+import { mergeTimelineMessages } from "../shared/messages.mjs";
 
 const INITIAL_HISTORY_BYTES = 4 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
@@ -167,10 +169,15 @@ const METADATA_TAGS = [
   "apps_instructions",
   "plugins_instructions",
   "collaboration_mode",
+  "external_codex_apps_open_page",
+  "in-app-browser-context",
+  "send_user_message_question_reply",
 ];
 
 function sanitizeUserText(value) {
   let text = String(value ?? "");
+  const forwarded = text.match(/<codex_delegation>[\s\S]*?<input>([\s\S]*?)<\/input>[\s\S]*?<\/codex_delegation>/i);
+  if (forwarded) text = forwarded[1];
   if (/^# Session title\b/i.test(text.trim())) return "";
   for (const tag of METADATA_TAGS) {
     const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -295,9 +302,9 @@ function pushMessage(messages, role, content, timestamp, meta) {
   const text = role === "user" ? sanitizeUserText(content) : String(content ?? "").trim();
   if (!text) return;
   const previous = messages.at(-1);
-  if (previous?.role === role && previous.content === text) return;
+  if (previous?.role === role && previous.content === text && previous.timestamp === timestamp) return;
   messages.push({
-    id: `${timestamp ?? Date.now()}-${messages.length}`,
+    id: `${timestamp ?? "unknown"}-${role}-${createHash("sha256").update(text).digest("hex").slice(0, 16)}`,
     role,
     content: text.slice(0, 120_000),
     timestamp: timestamp ?? null,
@@ -334,8 +341,20 @@ export function parseCodexTranscript(rows) {
   const openCalls = new Set();
   let state = "idle";
   let sawTaskSignal = false;
+  let settings;
   for (const [index, row] of rows.entries()) {
     const timestamp = row?.timestamp ?? null;
+    if (row?.type === "turn_context" && row.payload?.model) {
+      const context = row.payload;
+      const sandbox = context.sandbox_policy?.type;
+      settings = {
+        model: context.model,
+        reasoning: context.effort ?? context.reasoning_effort ?? "",
+        permission: sandbox === "danger-full-access" ? "full" : sandbox === "read-only" ? "read-only" : "workspace",
+        serviceTier: context.service_tier ?? "",
+        source: "session",
+      };
+    }
     if (row?.type === "event_msg") {
       if (row.payload?.type === "user_message") pushMessage(eventMessages, "user", row.payload.message, timestamp);
       if (row.payload?.type === "agent_message") pushMessage(eventMessages, "assistant", row.payload.message, timestamp);
@@ -355,10 +374,20 @@ export function parseCodexTranscript(rows) {
         const detail = duration > 0 ? `${Math.max(1, Math.round(duration / 1000))} 秒` : "";
         activity.push(activityItem(row, index, "任务完成", "completed", detail));
       }
+      if (["turn_aborted", "task_failed", "task_interrupted"].includes(row.payload?.type)) {
+        sawTaskSignal = true;
+        state = "idle";
+        activity.push(activityItem(row, index, row.payload.type === "task_failed" ? "任务失败" : "任务已停止", "failed"));
+      }
     }
     if (row?.type === "response_item" && row.payload?.type === "message") {
       const role = row.payload.role === "assistant" ? "assistant" : row.payload.role === "user" ? "user" : null;
       if (role) pushMessage(responseMessages, role, textFromContent(row.payload.content), timestamp);
+    }
+    if (row?.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(row.payload?.type)
+      && typeof row.payload.output === "string" && /^\s*<codex_delegation>/.test(row.payload.output)
+      && /<\/codex_delegation>\s*$/.test(row.payload.output)) {
+      pushMessage(responseMessages, "user", row.payload.output, timestamp);
     }
     if (row?.type === "response_item" && ["function_call", "custom_tool_call"].includes(row.payload?.type)) {
       const callId = row.payload.call_id ?? row.payload.id ?? `${index}`;
@@ -379,21 +408,24 @@ export function parseCodexTranscript(rows) {
       openCalls.delete(row.payload.call_id);
     }
   }
-  const messages = eventMessages.length ? eventMessages : responseMessages;
+  // Forwarded desktop messages can exist only in response_item. Keeping just
+  // event_msg loses those user turns and leaves the local echo below the reply.
+  const matchedEvents = new Set();
+  const unmatchedResponses = responseMessages.filter((message) => {
+    const match = eventMessages.findIndex((event, index) => !matchedEvents.has(index)
+      && event.role === message.role && event.content === message.content
+      && Math.abs(Date.parse(event.timestamp ?? "") - Date.parse(message.timestamp ?? "")) < 2_000);
+    if (match < 0) return true;
+    matchedEvents.add(match);
+    return false;
+  });
+  const messages = mergeTimelineMessages(unmatchedResponses, eventMessages);
   if (!sawTaskSignal) state = openCalls.size ? "working" : "idle";
-  return { messages, activity: activity.slice(-40), state, hasTaskSignal: sawTaskSignal };
+  return { messages, activity: activity.slice(-40), state, hasTaskSignal: sawTaskSignal, settings };
 }
 
 function mergeMessages(previous, incoming) {
-  const result = [...previous];
-  const seen = new Set(previous.map((message) => `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`));
-  for (const message of incoming) {
-    const signature = `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`;
-    if (seen.has(signature)) continue;
-    seen.add(signature);
-    result.push(message);
-  }
-  return result.slice(-120);
+  return mergeTimelineMessages(previous, incoming, 240);
 }
 
 function parserFor() {
@@ -441,6 +473,7 @@ async function cachedTranscript(provider, filePath) {
     const recent = parserFor(provider)(recentRows);
     const transcript = {
       ...recent,
+      settings: recent.settings ?? previous.transcript.settings,
       messages: mergeMessages(previous.transcript.messages, recent.messages),
       activity: recent.activity.length ? recent.activity : previous.transcript.activity,
       state: recent.hasTaskSignal || recent.state === "working" ? recent.state : previous.transcript.state,
@@ -460,8 +493,12 @@ export async function readSessionTranscript(provider, filePath) {
 }
 
 export async function getSession(provider, id) {
-  const sessions = await listSessions(true);
-  const session = sessions.find((item) => item.provider === provider && item.id === id);
+  let sessions = await listSessions();
+  let session = sessions.find((item) => item.provider === provider && item.id === id);
+  if (!session) {
+    sessions = await listSessions(true);
+    session = sessions.find((item) => item.provider === provider && item.id === id);
+  }
   if (!session) throw new Error("会话不存在或已被移动");
   const transcript = await readSessionTranscript(provider, session.filePath);
   return {
@@ -470,6 +507,7 @@ export async function getSession(provider, id) {
     messages: transcript.messages.slice(-120),
     activity: transcript.activity,
     state: transcript.state,
+    settings: transcript.settings,
   };
 }
 

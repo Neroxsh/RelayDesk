@@ -1,4 +1,6 @@
 import type { Message, Provider } from "./relaydesk-types";
+import { mergeTimelineMessages } from "../shared/messages.mjs";
+export { messageSignature } from "../shared/messages.mjs";
 
 export const PROVIDERS: Record<Provider, { name: string; short: string; company: string }> = {
   codex: { name: "Codex", short: "C", company: "OpenAI" },
@@ -48,18 +50,6 @@ export function providerName(provider: Provider) {
   return PROVIDERS[provider].name;
 }
 
-export function messageSignature(message: Message) {
-  return `${message.role}\u0000${message.timestamp ?? ""}\u0000${message.content}`;
-}
-
 export function mergeSessionMessages(previous: Message[], incoming: Message[]) {
-  const merged = [...previous];
-  const seen = new Set(previous.map(messageSignature));
-  for (const message of incoming) {
-    const signature = messageSignature(message);
-    if (seen.has(signature)) continue;
-    seen.add(signature);
-    merged.push(message);
-  }
-  return merged.slice(-240);
+  return mergeTimelineMessages(previous, incoming);
 }

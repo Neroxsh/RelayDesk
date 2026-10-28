@@ -1,15 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { sendDesktopPrompt } from "./desktop-bridge.mjs";
 
-const CODEX_WINDOW_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "codex-window.ps1");
 const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CODEX_DEEPLINK_SETTLE_MS = 1_400;
-
-function wait(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 
 export function codexThreadUrl(sessionId) {
   const id = String(sessionId ?? "").trim();
@@ -149,44 +143,10 @@ export function sendPrompt(session, prompt, settings, onEvent) {
   };
 }
 
-export function sendToCurrentCodex(prompt) {
+export function sendToCurrentCodex(prompt, sessionId, options) {
   if (process.platform !== "win32") throw new Error("当前 Codex 窗口控制只支持 Windows");
-  const child = spawn(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Sta",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      CODEX_WINDOW_SCRIPT,
-      "-PromptBase64",
-      Buffer.from(prompt, "utf8").toString("base64"),
-    ],
-    { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
-  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
-  const completed = new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => {
-      let result = null;
-      try { result = JSON.parse(stdout.trim().split(/\r?\n/).at(-1) ?? "{}"); } catch { /* use stderr below */ }
-      if (code === 0 && result?.ok) resolve(result);
-      else reject(new Error(result?.error ?? stderr.trim() ?? "无法把指令发送到当前 Codex 窗口"));
-    });
-  });
-  void completed.catch(() => undefined);
-  return {
-    pid: child.pid,
-    completed,
-    stop() {
-      if (child.exitCode === null) child.kill();
-    },
-  };
+  codexThreadUrl(sessionId);
+  return sendDesktopPrompt(sessionId, prompt, options);
 }
 
 export function openCodexSession(sessionId) {
@@ -215,25 +175,7 @@ export function openCodexSession(sessionId) {
   };
 }
 
-export function sendToCodexSession(sessionId, prompt) {
-  const navigation = openCodexSession(sessionId);
-  let injection = null;
-  let stopped = false;
-  const completed = (async () => {
-    await navigation.completed;
-    await wait(CODEX_DEEPLINK_SETTLE_MS);
-    if (stopped) throw new Error("发送已停止");
-    injection = sendToCurrentCodex(prompt);
-    return injection.completed;
-  })();
-  void completed.catch(() => undefined);
-  return {
-    pid: navigation.pid,
-    completed,
-    stop() {
-      stopped = true;
-      navigation.stop();
-      injection?.stop();
-    },
-  };
+export function sendToCodexSession(sessionId, prompt, options) {
+  codexThreadUrl(sessionId);
+  return sendDesktopPrompt(sessionId, prompt, options);
 }

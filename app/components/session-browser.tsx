@@ -61,7 +61,7 @@ export function SessionBrowser({
   onForgetPhone,
   setCollapsed,
 }: SessionBrowserProps) {
-  const defaultModel = status?.models.find((model) => model.isDefault) ?? status?.models[0];
+  const defaultModel = status?.models.find((model) => model.model === status.defaultSettings?.model);
   const used = status?.usage.primary?.usedPercent;
   return (
     <aside className="workspace-sidebar">
@@ -72,8 +72,8 @@ export function SessionBrowser({
 
       <button className="codex-overview" type="button" onClick={onOpenSettings}>
         <span className="codex-mark">C</span>
-        <span><strong>Codex</strong><small>{defaultModel?.displayName ?? "正在读取模型"} · {sessionCount} 个会话</small></span>
-        {typeof used === "number" ? <i>{Math.max(0, Math.round(100 - used))}%</i> : null}
+        <span><strong>Codex</strong><small>{defaultModel?.displayName ?? status?.defaultSettings?.model ?? "正在读取模型"} · {sessionCount} 个会话</small></span>
+        {typeof used === "number" ? <i title="短周期剩余额度">余 {Math.max(0, Math.round(100 - used))}%</i> : <i>读取中</i>}
         <Settings2 size={17} />
       </button>
 
@@ -86,7 +86,7 @@ export function SessionBrowser({
       {currentWindow ? (
         <button className={`current-task ${selectedKey === currentWindow.key ? "selected" : ""}`} type="button" onClick={() => onSelect(currentWindow)}>
           <SquareTerminal size={20} strokeWidth={1.8} />
-          <span><strong>电脑上的当前任务</strong><small>{currentWindow.cwd || "Codex"}</small></span>
+          <span><strong>继续上次会话</strong><small>{currentWindow.cwd || "Codex"}</small></span>
           <i>实时</i>
         </button>
       ) : null}
@@ -114,7 +114,7 @@ export function SessionBrowser({
               {!isCollapsed ? <div className="project-sessions">{project.sessions.map((session) => (
                 <button className={`session-row ${selectedKey === session.key ? "selected" : ""}`} type="button" key={session.key} onClick={() => onSelect(session)}>
                   <MessageSquare size={15} strokeWidth={1.7} />
-                  <span><strong>{session.title}</strong><small>{session.openInCodex ? "正在电脑上打开" : formatWhen(session.updatedAt)}</small></span>
+                  <span><strong>{session.title}</strong><small>{session.openInCodex ? "最近访问" : formatWhen(session.updatedAt)}</small></span>
                   {session.active || running[session.key] ? <LoaderCircle className="spin" size={15} /> : null}
                 </button>
               ))}</div> : null}

@@ -225,6 +225,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .message-body { color: var(--ink); font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
 .message.user .message-body { padding: 11px 14px; border-radius: 15px 15px 4px 15px; background: var(--surface-strong); }
 .message.pending { opacity: .62; }
+.message.pending:has(.message-delivery.submitted), .message.pending:has(.message-delivery.received) { opacity: 1; }
+.message-delivery { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.message-delivery small { flex-basis: 100%; font-size: 11px; }
+.message-delivery button { padding: 4px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); cursor: pointer; }
+.connection-notice { position: sticky; z-index: 2; top: 0; padding: 10px 14px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--muted); font-size: 12px; }
+.secondary-usage { margin-top: 9px; }
+.status-freshness { margin: 9px 0; color: var(--muted); font-size: 11px; }
+.usage-unavailable { width: 100%; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--muted); cursor: pointer; }
+.settings-header-actions { display: flex; align-items: center; gap: 8px; }
+.settings-header-actions > button:first-child { width: auto; font-size: 12px; }
 .message-body > *:first-child { margin-top: 0; }
 .message-body > *:last-child { margin-bottom: 0; }
 .message-body p { margin: .65em 0; }

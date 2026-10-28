@@ -23,10 +23,17 @@ export type CodexStatus = {
   available: boolean;
   models: CodexModel[];
   account: { type: string | null; planType: string | null } | null;
+  source?: "desktop" | "cli";
+  stale?: boolean;
+  warnings?: string[];
+  desktopSettingsOnly?: boolean;
+  defaultSettings?: RunSettings | null;
   usage: {
     planType: string | null;
     primary: RateLimitWindow | null;
     secondary: RateLimitWindow | null;
+    buckets?: Array<{ id: string; name: string; primary: RateLimitWindow | null; secondary: RateLimitWindow | null }>;
+    availableResetCount?: number | null;
     credits: { hasCredits: boolean; unlimited: boolean; balance: string | null } | null;
     activity: {
       lifetimeTokens: number;
@@ -69,6 +76,9 @@ export type Message = {
   content: string;
   timestamp?: string | null;
   pending?: boolean;
+  requestId?: string;
+  delivery?: string;
+  error?: string;
 };
 
 export type ActivityItem = {
@@ -83,6 +93,17 @@ export type SessionDetail = SessionSummary & {
   messages: Message[];
   activity?: ActivityItem[];
   state?: "idle" | "working";
+  settings?: RunSettings & { source?: string };
+};
+
+export type OutboxEntry = {
+  requestId: string;
+  sessionKey: string;
+  payload: RemotePayload;
+  createdAt: number;
+  updatedAt: number;
+  status: string;
+  error?: string;
 };
 
 export type StoredPairing = {

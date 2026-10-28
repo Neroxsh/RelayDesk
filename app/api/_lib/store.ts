@@ -14,6 +14,8 @@ export function ensureSchema(): Promise<void> {
   if (!schemaPromise) {
     const db = store();
     schemaPromise = (async () => {
+      const ready = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'messages_delivery_idx'").first();
+      if (ready) return;
       await db.batch([
         db.prepare(`CREATE TABLE IF NOT EXISTS devices (
           id TEXT PRIMARY KEY,
@@ -43,6 +45,7 @@ export function ensureSchema(): Promise<void> {
           sender_id TEXT NOT NULL,
           target_id TEXT NOT NULL,
           kind TEXT NOT NULL,
+          delivery_id TEXT,
           envelope TEXT NOT NULL,
           created_at INTEGER NOT NULL
         )`),
@@ -73,7 +76,13 @@ export function ensureSchema(): Promise<void> {
       if (!(columns.results ?? []).some((column) => column.name === "pair_key_hash")) {
         await db.prepare("ALTER TABLE devices ADD COLUMN pair_key_hash TEXT").run();
       }
+      const messageColumns = await db.prepare("PRAGMA table_info(messages)").all<{ name: string }>();
+      if (!(messageColumns.results ?? []).some((column) => column.name === "delivery_id")) {
+        try { await db.prepare("ALTER TABLE messages ADD COLUMN delivery_id TEXT").run(); }
+        catch (error) { if (!/duplicate column/i.test(error instanceof Error ? error.message : String(error))) throw error; }
+      }
       await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS devices_pair_key_hash_idx ON devices(pair_key_hash)").run();
+      await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS messages_delivery_idx ON messages(sender_id, delivery_id)").run();
     })().catch((error: unknown) => {
         schemaPromise = undefined;
         throw error;
@@ -91,7 +100,7 @@ export function now() {
 }
 
 export const PRESENCE_WRITE_INTERVAL = 60_000;
-export const MESSAGE_RETENTION_PER_TARGET = 30;
+export const MESSAGE_RETENTION_PER_TARGET = 256;
 export const MESSAGE_RETENTION_MS = 24 * 60 * 60_000;
 
 export async function touchDevicePresence(deviceId: string, timestamp = now()) {

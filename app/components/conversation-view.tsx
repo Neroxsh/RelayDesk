@@ -27,9 +27,13 @@ type ConversationViewProps = {
   modelName: string;
   managedSettings: boolean;
   sending: boolean;
+  connectionError?: string;
+  supportsStop?: boolean;
   messageEndRef: RefObject<HTMLDivElement | null>;
   onBack: () => void;
   onDraftChange: (value: string) => void;
+  onFollowChange: (value: boolean) => void;
+  onRetry: (requestId: string) => void;
   onOpenSettings: () => void;
   onSubmit: (event?: FormEvent) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -47,9 +51,13 @@ export function ConversationView({
   modelName,
   managedSettings,
   sending,
+  connectionError,
+  supportsStop,
   messageEndRef,
   onBack,
   onDraftChange,
+  onFollowChange,
+  onRetry,
   onOpenSettings,
   onSubmit,
   onKeyDown,
@@ -60,14 +68,15 @@ export function ConversationView({
   const waiting = runningStatus === "waiting";
   const deliveryCopy = runningStatus === "sending"
     ? "正在发送到电脑"
-    : runningStatus === "running"
+    : runningStatus === "received"
+      ? "电脑已收到，正在提交"
+      : runningStatus === "running"
       ? "已送达，正在启动"
       : waiting
         ? `${providerName(session.provider)} 正在思考`
         : "正在继续回复";
-  // The current Codex window accepts a queued instruction while its existing task is
-  // running. Historical CLI sessions still need to finish before another run starts.
-  const submitLocked = sending || Boolean(runningStatus) || (!session.currentWindow && transcriptWorking);
+  // Desktop conversations accept follow-up input while the active turn is running.
+  const submitLocked = sending;
   const activity = detail?.activity ?? [];
 
   return (
@@ -75,17 +84,21 @@ export function ConversationView({
       <header className="conversation-header">
         <button className="back-button" type="button" onClick={onBack} aria-label="返回会话列表"><ArrowLeft size={21} /></button>
         <div className="conversation-heading">
-          <strong>{session.currentWindow ? "电脑上的当前任务" : session.title}</strong>
+          <strong>{session.currentWindow ? "继续上次会话" : session.title}</strong>
           <span><i className={`provider-dot ${session.provider}`} />{providerName(session.provider)}</span>
         </div>
-        {isWorking && !session.currentWindow ? (
+        {isWorking && supportsStop && !session.currentWindow ? (
           <button className="stop-button" type="button" onClick={onStop}><CircleStop size={15} /><span>停止</span></button>
         ) : (
           <span className={`connection-state ${device?.online ? "online" : ""}`}><i />{device?.online ? (isWorking ? "进行中" : "已同步") : "离线"}</span>
         )}
       </header>
 
-      <div className="message-scroll">
+      <div className="message-scroll" onScroll={(event) => {
+        const element = event.currentTarget;
+        onFollowChange(element.scrollHeight - element.scrollTop - element.clientHeight < 160);
+      }}>
+        {connectionError ? <div className="connection-notice" role="status">{connectionError}</div> : null}
         {!detail ? (
           <div className="loading-conversation" role="status" aria-live="polite">
             <div className="loading-conversation-orbit" aria-hidden="true"><i /><i /><i /></div>
@@ -113,6 +126,11 @@ export function ConversationView({
           <article className={`message ${message.role} ${message.pending ? "pending" : ""}`} key={message.id}>
             <div className="message-label"><b>{message.role === "user" ? "你" : providerName(session.provider)}</b>{formatMessageTime(message.timestamp) ? <time>{formatMessageTime(message.timestamp)}</time> : null}</div>
             <div className="message-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
+            {message.delivery ? <div className={`message-delivery ${message.delivery}`}>
+              <span>{({ sending: "正在发送", relayed: "已到中继，等待电脑确认", received: "电脑已收到", running: "正在提交", submitted: "已送达", uncertain: "正在核实送达状态", failed: "未能提交", retryable: "电脑尚未收到" } as Record<string, string>)[message.delivery] ?? message.delivery}</span>
+              {message.error ? <small>{message.error}</small> : null}
+              {message.requestId && ["uncertain", "failed", "retryable"].includes(message.delivery) ? <button type="button" onClick={() => onRetry(message.requestId!)}>{message.delivery === "uncertain" ? "查询状态" : "重新发送"}</button> : null}
+            </div> : null}
           </article>
         ))}
 
@@ -130,20 +148,24 @@ export function ConversationView({
         <div className="composer-meta">
           <button className="run-settings-button" type="button" onClick={onOpenSettings}>
             {session.currentWindow ? <Terminal size={14} /> : <SlidersHorizontal size={14} />}
-            <span>{session.currentWindow || !managedSettings ? "电脑端设置" : `${modelName} · ${settings.permission === "read-only" ? "只读" : settings.permission === "full" ? "完全访问" : "工作区"}`}</span>
+            <span>{modelName || "读取电脑设置中"}{settings.reasoning ? ` · ${settings.reasoning}` : ""}{managedSettings ? " · 手机设置" : ""}</span>
           </button>
           <span className="sync-copy">{
             session.currentWindow && runningStatus
               ? "正在送达电脑"
               : session.currentWindow && transcriptWorking
                 ? "发送后会排到当前任务后"
-                : isWorking
+              : isWorking
                   ? "回复会持续显示在这里"
                   : "与电脑保持同步"
           }</span>
         </div>
         <div className="composer-input">
-          <textarea rows={1} value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={onKeyDown} placeholder={waiting ? "正在等待回复" : `给 ${providerName(session.provider)} 发消息`} />
+          <textarea rows={1} maxLength={12_000} value={draft} onChange={(event) => {
+            onDraftChange(event.target.value);
+            event.currentTarget.style.height = "auto";
+            event.currentTarget.style.height = `${Math.min(150, event.currentTarget.scrollHeight)}px`;
+          }} onKeyDown={onKeyDown} placeholder={isWorking ? "继续补充，电脑会接收后续消息" : `给 ${providerName(session.provider)} 发消息`} />
           <button type="submit" disabled={!draft.trim() || submitLocked} aria-label="发送"><ArrowUp size={20} /></button>
         </div>
       </form>

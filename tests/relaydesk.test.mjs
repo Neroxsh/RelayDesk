@@ -125,7 +125,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(conversation, /返回会话列表/);
   assert.match(conversation, /回复会持续显示在这里/);
   assert.match(conversation, /发送后会排到当前任务后/);
-  assert.match(conversation, /!session\.currentWindow && transcriptWorking/);
+  assert.match(conversation, /const submitLocked = sending/);
   assert.doesNotMatch(conversation, /disabled=\{!draft\.trim\(\) \|\| sending \|\| isWorking\}/);
   assert.match(conversation, /任务进行中/);
   assert.match(conversation, /run-settings-button/);
@@ -198,7 +198,7 @@ test("Codex capabilities come from the local app server", async () => {
   assert.doesNotMatch(status, /email:/);
   assert.match(settings, /思考强度/);
   assert.match(settings, /权限范围/);
-  assert.match(settings, /本期可用/);
+  assert.match(settings, /本周/);
   assert.match(setup, /LaunchAgents/);
   assert.match(setup, /Microsoft :: Windows|process\.platform === "win32"/);
 });
@@ -290,7 +290,7 @@ test("the realtime relay bounds and acknowledges its encrypted message queues", 
     readFile(new URL("../app/api/client/send/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../agent/index.mjs", import.meta.url), "utf8"),
   ]);
-  assert.match(store, /MESSAGE_RETENTION_PER_TARGET = 30/);
+  assert.match(store, /MESSAGE_RETENTION_PER_TARGET = 256/);
   assert.match(store, /MESSAGE_RETENTION_MS = 24 \* 60 \* 60_000/);
   assert.match(store, /DELETE FROM messages WHERE target_id = \? AND id <= \?/);
   assert.match(store, /LIMIT 1 OFFSET \?/);
