@@ -20,7 +20,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "command",
         nargs="?",
-        choices=("setup", "start", "control", "pair", "status"),
+        choices=("setup", "setup-ccswitch", "start", "control", "pair", "status"),
         default="setup",
     )
     result.add_argument("--relay", default=os.environ.get("RELAYDESK_URL", DEFAULT_RELAY))
@@ -83,6 +83,14 @@ def main() -> int:
     if not node:
         print("RelayDesk requires Node.js 22 or newer.", file=sys.stderr)
         return 2
+    if args.command == "setup-ccswitch":
+        if sys.platform != "win32":
+            print("CC Switch global switching is currently verified on Windows x64 only.", file=sys.stderr)
+            return 2
+        if args.dry_run:
+            print("Install the optional CC Switch CLI 5.11.2 adapter (schema 20).")
+            return 0
+        return subprocess.call(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(Path(__file__).with_name("install-ccswitch-cli.ps1"))])
     major = int(subprocess.check_output([node, "-p", "process.versions.node.split('.')[0]"], text=True).strip())
     if major < 22:
         print("RelayDesk requires Node.js 22 or newer.", file=sys.stderr)

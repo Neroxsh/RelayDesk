@@ -1,4 +1,17 @@
-export type Provider = "codex";
+export type Provider = "codex" | "claude";
+
+export type ClaudeStatus = {
+  available: boolean;
+  version: string;
+  canSend: boolean;
+  newSession: boolean;
+  effort: boolean;
+  reasoningEfforts: string[];
+  models: Array<{ id: string; model: string; displayName: string }>;
+  defaultSettings: RunSettings;
+  ccSwitch: { available: boolean; schema: number | null; currentId: string; canSwitch: boolean; reason: string; providers: Array<{ id: string; name: string; current: boolean }> };
+  updatedAt: number;
+};
 export type PermissionMode = "read-only" | "workspace" | "full";
 
 export type CodexModel = {
@@ -90,6 +103,7 @@ export type ActivityItem = {
 };
 
 export type SessionDetail = SessionSummary & {
+  terminalOpen?: boolean;
   messages: Message[];
   activity?: ActivityItem[];
   state?: "idle" | "working";

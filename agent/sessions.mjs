@@ -2,7 +2,8 @@ import { open, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
-import { mergeTimelineMessages } from "../shared/messages.mjs";
+import { mergeTimelineMessages } from "./messages.mjs";
+import { claudeHome, configureClaudeHome, parseClaudeTranscript, pendingClaudeSessions, activeClaudeSessions } from "./claude-sessions.mjs";
 
 const INITIAL_HISTORY_BYTES = 4 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
@@ -33,19 +34,22 @@ export function normalizeProviderHome(provider, value) {
   let resolved = cleanPath(value);
   if (!resolved) return "";
   const leaf = path.basename(resolved).toLowerCase();
-  if (provider !== "codex") return "";
+  if (!["codex", "claude"].includes(provider)) return "";
+  if (provider === "claude" && leaf === "projects") resolved = path.dirname(resolved);
   if (leaf === "sessions") resolved = path.dirname(resolved);
   if (leaf === "session_index.jsonl") resolved = path.dirname(resolved);
   return resolved;
 }
 
-export function configureSessionRoots({ codexHome = "" } = {}) {
+export function configureSessionRoots({ codexHome = "", claudeHome: customClaudeHome = "" } = {}) {
   configuredHome = normalizeProviderHome("codex", codexHome);
+  configureClaudeHome(normalizeProviderHome("claude", customClaudeHome));
   invalidateSessions();
 }
 
 function providerHomes(provider = "codex") {
   const home = os.homedir();
+  if (provider === "claude") return [claudeHome()];
   if (provider !== "codex") return [];
   return uniquePaths([
     configuredHome,
@@ -58,7 +62,7 @@ function providerHomes(provider = "codex") {
 }
 
 function providerRoots(provider) {
-  return providerHomes(provider).map((home) => ({ home, root: path.join(home, "sessions") }));
+  return providerHomes(provider).map((home) => ({ home, root: path.join(home, provider === "claude" ? "projects" : "sessions") }));
 }
 
 async function walk(directory) {
@@ -263,9 +267,21 @@ export async function listSessions(force = false) {
       return null;
     }
   });
+  const claudeFiles = (await walk(path.join(claudeHome(), "projects")).catch(() => [])).filter((file) => !file.includes(`${path.sep}subagents${path.sep}`));
+  const claudeRecords = await mapConcurrent(claudeFiles, 8, async (filePath) => {
+    try {
+      const info = await stat(filePath);
+      const rows = parseLines(await readHead(filePath));
+      const meta = rows.find((row) => row.sessionId && row.cwd && !row.isSidechain);
+      if (!meta) return null;
+      const text = rows.find((row) => row.type === "user" && !row.isMeta && typeof row.message?.content === "string")?.message.content;
+      const titleRow = rows.findLast((row) => row.type === "custom-title");
+      return { id: meta.sessionId, key: `claude:${meta.sessionId}`, provider: "claude", title: trimTitle(titleRow?.customTitle ?? text) || "Claude Code 会话", cwd: meta.cwd, ...projectFields(meta.cwd), filePath, updatedAt: info.mtimeMs, recent: Date.now() - info.mtimeMs < 120_000 };
+    } catch { return null; }
+  });
   const sessions = [];
   const sessionKeys = new Set();
-  for (const session of records) {
+  for (const session of [...records, ...claudeRecords, ...await pendingClaudeSessions()]) {
     if (!session || sessionKeys.has(session.key)) continue;
     sessionKeys.add(session.key);
     sessions.push(session);
@@ -277,8 +293,7 @@ export async function listSessions(force = false) {
 
 export async function sessionDiagnostics() {
   const parsedSessions = await listSessions();
-  const inspect = async () => {
-    const provider = "codex";
+  const inspect = async (provider) => {
     const locations = providerRoots(provider);
     const groups = await Promise.all(locations.map(({ root }) => walk(root)));
     const counts = locations.map(({ home, root }, index) => ({ home, root, count: groups[index].length }));
@@ -286,7 +301,7 @@ export async function sessionDiagnostics() {
     const fileCount = uniquePaths(groups.flat()).length;
     const count = parsedSessions.filter((session) => session.provider === provider).length;
     return {
-      configuredHome,
+      configuredHome: provider === "codex" ? configuredHome : "",
       activeHome: active.home,
       activeRoot: active.root,
       count,
@@ -295,7 +310,7 @@ export async function sessionDiagnostics() {
       searched: counts.map(({ home, root, count }) => ({ home, root, count })),
     };
   };
-  return { codex: await inspect() };
+  return { codex: await inspect("codex"), claude: await inspect("claude").catch(() => ({ count: 0, fileCount: 0, searched: [], error: "Claude 会话目录不可读" })) };
 }
 
 function pushMessage(messages, role, content, timestamp, meta) {
@@ -428,8 +443,8 @@ function mergeMessages(previous, incoming) {
   return mergeTimelineMessages(previous, incoming, 240);
 }
 
-function parserFor() {
-  return parseCodexTranscript;
+function parserFor(provider) {
+  return provider === "claude" ? parseClaudeTranscript : parseCodexTranscript;
 }
 
 function enoughContext(transcript, fileSize, bytes) {
@@ -488,7 +503,7 @@ async function cachedTranscript(provider, filePath) {
 }
 
 export async function readSessionTranscript(provider, filePath) {
-  if (provider !== "codex") throw new Error("当前版本仅支持 Codex");
+  if (!["codex", "claude"].includes(provider)) throw new Error("不支持的会话类型");
   return cachedTranscript(provider, filePath);
 }
 
@@ -500,13 +515,15 @@ export async function getSession(provider, id) {
     session = sessions.find((item) => item.provider === provider && item.id === id);
   }
   if (!session) throw new Error("会话不存在或已被移动");
-  const transcript = await readSessionTranscript(provider, session.filePath);
+  const transcript = session.filePath ? await readSessionTranscript(provider, session.filePath) : { messages: [], activity: [], state: "idle" };
+  const activeClaude = provider === "claude" ? (await activeClaudeSessions()).find((row) => row.sessionId === id) : null;
   return {
     ...session,
     filePath: undefined,
     messages: transcript.messages.slice(-120),
     activity: transcript.activity,
-    state: transcript.state,
+    state: activeClaude?.status === "busy" ? "working" : transcript.state,
+    terminalOpen: Boolean(activeClaude && activeClaude.kind !== "background" && activeClaude.kind !== "sdk" && activeClaude.entrypoint !== "sdk-cli"),
     settings: transcript.settings,
   };
 }

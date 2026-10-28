@@ -14,8 +14,8 @@ import {
   Settings2,
   SquareTerminal,
 } from "lucide-react";
-import { formatWhen } from "../relaydesk-meta";
-import type { CodexStatus, DeviceStatus, ProjectGroup, SessionSummary, StoredPairing } from "../relaydesk-types";
+import { formatWhen, providerName } from "../relaydesk-meta";
+import type { ClaudeStatus, Provider, CodexStatus, DeviceStatus, ProjectGroup, SessionSummary, StoredPairing } from "../relaydesk-types";
 import { SessionLoader } from "./session-loader";
 
 type SessionBrowserProps = {
@@ -23,6 +23,10 @@ type SessionBrowserProps = {
   device: DeviceStatus | null;
   pairing: StoredPairing;
   status: CodexStatus | null;
+  claudeStatus: ClaudeStatus | null;
+  provider: Provider;
+  onProviderChange: (provider: Provider) => void;
+  onNewClaude: () => void;
   loading: boolean;
   loadingProgress: number;
   loadingLabel: string;
@@ -45,6 +49,10 @@ export function SessionBrowser({
   device,
   pairing,
   status,
+  claudeStatus,
+  provider,
+  onProviderChange,
+  onNewClaude,
   loading,
   loadingProgress,
   loadingLabel,
@@ -70,10 +78,12 @@ export function SessionBrowser({
         <button className="icon-button" type="button" onClick={onForgetPhone} aria-label="连接管理" title="连接管理"><MoreHorizontal size={19} /></button>
       </header>
 
+      <div className="assistant-tabs" aria-label="选择助手">{(["codex", "claude"] as const).map((item) => <button type="button" key={item} className={provider === item ? "active" : ""} onClick={() => onProviderChange(item)}>{providerName(item)}</button>)}</div>
+
       <button className="codex-overview" type="button" onClick={onOpenSettings}>
-        <span className="codex-mark">C</span>
-        <span><strong>Codex</strong><small>{defaultModel?.displayName ?? status?.defaultSettings?.model ?? "正在读取模型"} · {sessionCount} 个会话</small></span>
-        {typeof used === "number" ? <i title="短周期剩余额度">余 {Math.max(0, Math.round(100 - used))}%</i> : <i>读取中</i>}
+        <span className="codex-mark">{provider === "claude" ? "A" : "C"}</span>
+        <span><strong>{providerName(provider)}</strong><small>{provider === "claude" ? claudeStatus?.ccSwitch.providers.find((item) => item.current)?.name || claudeStatus?.version || "检测中" : defaultModel?.displayName ?? status?.defaultSettings?.model ?? "正在读取模型"} · {sessionCount} 个会话</small></span>
+        {provider === "codex" ? typeof used === "number" ? <i title="短周期剩余额度">余 {Math.max(0, Math.round(100 - used))}%</i> : <i>读取中</i> : <i>设置</i>}
         <Settings2 size={17} />
       </button>
 
@@ -82,6 +92,8 @@ export function SessionBrowser({
         <span><strong>{device?.name ?? pairing.device.name}</strong><small>{device?.online ? "已连接" : "等待电脑上线"}</small></span>
         <button className="icon-button" type="button" onClick={onRefresh} aria-label="同步会话" title="同步会话"><RefreshCw className={loading ? "spin" : ""} size={16} /></button>
       </div>
+
+      {provider === "claude" ? <button className="current-task" type="button" disabled={!claudeStatus?.canSend || !claudeStatus.newSession} onClick={onNewClaude}><SquareTerminal size={20} /><span><strong>新建 Claude 会话</strong><small>{claudeStatus?.newSession ? "在电脑后台运行，手机继续操作" : "请先安装支持新建会话的 Claude 版本"}</small></span></button> : null}
 
       {currentWindow ? (
         <button className={`current-task ${selectedKey === currentWindow.key ? "selected" : ""}`} type="button" onClick={() => onSelect(currentWindow)}>
@@ -97,11 +109,11 @@ export function SessionBrowser({
       </label>
 
       <div className="section-heading"><span>项目</span><small>{projectGroups.length}</small></div>
-      <nav className="project-list" aria-label="Codex 项目和会话">
+      <nav className="project-list" aria-label={`${providerName(provider)} 项目和会话`}>
         {loading && !projectGroups.length ? <SessionLoader compact progress={loadingProgress} label={loadingLabel} /> : null}
         {loading && projectGroups.length ? <div className="background-loading"><i style={{ width: `${loadingProgress}%` }} /></div> : null}
         {projectGroups.map((project) => {
-          const collapseKey = `codex:${project.path}`;
+          const collapseKey = `${provider}:${project.path}`;
           const isCollapsed = collapsed[collapseKey];
           return (
             <section className="project-group" key={collapseKey}>
@@ -121,7 +133,7 @@ export function SessionBrowser({
             </section>
           );
         })}
-        {!loading && !projectGroups.length ? <div className="empty-list"><Folder size={22} strokeWidth={1.4} /><p>{query ? "没有匹配的会话" : "还没有 Codex 会话"}</p></div> : null}
+        {!loading && !projectGroups.length ? <div className="empty-list"><Folder size={22} strokeWidth={1.4} /><p>{query ? "没有匹配的会话" : `还没有 ${providerName(provider)} 会话`}</p></div> : null}
       </nav>
     </aside>
   );

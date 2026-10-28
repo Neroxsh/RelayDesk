@@ -24,6 +24,23 @@ function resolveOnWindows(name) {
   return found && fs.existsSync(found) ? found : null;
 }
 
+export function claudeExecutable() {
+  if (process.env.RELAYDESK_CLAUDE_EXECUTABLE) {
+    const configured = process.env.RELAYDESK_CLAUDE_EXECUTABLE;
+    if (!fs.existsSync(configured)) throw new Error("指定的 Claude Code 程序不存在");
+    return /\.[mc]?js$/i.test(configured) ? { command: process.execPath, prefix: [configured] } : { command: configured, prefix: [] };
+  }
+  if (process.platform !== "win32") return { command: "claude", prefix: [] };
+  const found = resolveOnWindows("claude");
+  if (!found) throw new Error("没有找到 Claude Code，请先在电脑安装并登录");
+  const native = path.join(path.dirname(found), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+  if (fs.existsSync(native)) return { command: native, prefix: [] };
+  const script = path.join(path.dirname(found), "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+  if (fs.existsSync(script)) return { command: process.execPath, prefix: [script] };
+  if (path.extname(found).toLowerCase() === ".exe") return { command: found, prefix: [] };
+  throw new Error("请安装 Claude Code 原生版本，以便在后台安全运行");
+}
+
 export function codexExecutable() {
   const name = "codex";
   if (process.platform !== "win32") return { command: name, prefix: [] };

@@ -113,8 +113,8 @@ sequenceDiagram
 
 - Windows 10 / 11 或 macOS
 - Node.js `22.13.0` 或更高版本
-- 已安装并登录 Codex CLI
-- Windows 可选：Codex 桌面应用
+- 使用 Codex：已安装并登录 Codex；Windows 桌面会话发送需要打开 Codex 桌面应用
+- 使用 Claude：已安装并配置 Claude Code；各项功能按本机参数能力启用
 
 ### 方式一：从源码安装
 
@@ -203,9 +203,11 @@ C:\自定义位置\.codex\sessions
 - [x] 实时输出与进行中状态
 - [x] 永久绑定与端到端加密
 - [x] Windows 无窗口自恢复代理
-- [ ] Claude Code 独立会话入口
+- [x] Claude Code 独立会话入口（历史、新建、后台恢复、模型与思考设置）
 - [ ] 可选的自托管中继部署模板
 - [ ] PWA 通知与主屏幕体验
+
+Claude Code 与可选的 CC Switch 全局切换已接入。不同版本会按本机接口能力启用功能；CC Switch 的全局切换目前仅适配 Windows x64、schema 20 的直接连接模式，需要先退出桌面程序。完整的测试范围、安装方式与限制见 [版本兼容说明](docs/claude-compatibility.md)，不保证所有版本通用。
 
 ## 开发
 

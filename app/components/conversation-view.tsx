@@ -76,7 +76,7 @@ export function ConversationView({
         ? `${providerName(session.provider)} 正在思考`
         : "正在继续回复";
   // Desktop conversations accept follow-up input while the active turn is running.
-  const submitLocked = sending;
+  const submitLocked = sending || (session.provider === "claude" && (isWorking || Boolean(detail?.terminalOpen)));
   const activity = detail?.activity ?? [];
 
   return (
@@ -145,6 +145,7 @@ export function ConversationView({
       </div>
 
       <form className="composer" onSubmit={onSubmit}>
+        {session.provider === "claude" && detail?.terminalOpen ? <p className="settings-notice">这个会话正在电脑终端打开。先退出该会话再从手机继续，或在手机新建会话。</p> : null}
         <div className="composer-meta">
           <button className="run-settings-button" type="button" onClick={onOpenSettings}>
             {session.currentWindow ? <Terminal size={14} /> : <SlidersHorizontal size={14} />}
@@ -176,7 +177,7 @@ export function ConversationView({
 export function EmptyConversation({ provider }: { provider: SessionSummary["provider"] }) {
   return (
     <section className="conversation-panel empty">
-      <div className="conversation-empty"><span className={`provider-dot ${provider}`} /><h2>Codex</h2><p>选择一个会话继续。</p></div>
+      <div className="conversation-empty"><span className={`provider-dot ${provider}`} /><h2>{providerName(provider)}</h2><p>选择一个会话继续。</p></div>
     </section>
   );
 }

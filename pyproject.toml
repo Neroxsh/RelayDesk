@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "relaydesk-remote"
 version = "0.3.0"
-description = "Control local Codex sessions from your phone"
+description = "Control local Codex and Claude Code sessions from your phone"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

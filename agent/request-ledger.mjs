@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { writeAtomicJson } from "./persistence.mjs";
 
-const MUTATIONS = new Set(["session:send", "session:activate", "session:stop"]);
+const MUTATIONS = new Set(["session:send", "session:activate", "session:stop", "claude:create", "ccswitch:switch"]);
 const RETENTION = 24 * 60 * 60_000;
 
 export class RequestLedger {
@@ -28,7 +28,9 @@ export class RequestLedger {
   async claim(clientId, payload) {
     if (!MUTATIONS.has(payload?.type) || !payload?.requestId) return true;
     const key = `${clientId}:${payload.requestId}`;
-    const fingerprint = createHash("sha256").update(JSON.stringify([payload.type, payload.provider, payload.sessionId, payload.prompt, payload.settings])).digest("hex");
+    const fields = [payload.type, payload.provider, payload.sessionId, payload.prompt, payload.settings];
+    if (["claude:create", "ccswitch:switch"].includes(payload.type)) fields.push(payload.providerId, payload.cwd);
+    const fingerprint = createHash("sha256").update(JSON.stringify(fields)).digest("hex");
     const existing = this.records.get(key);
     if (existing?.expiresAt > Date.now()) {
       if (existing.fingerprint !== fingerprint) throw new Error("消息标识重复且内容不一致");

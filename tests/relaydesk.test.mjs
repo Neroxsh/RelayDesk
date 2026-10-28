@@ -121,7 +121,7 @@ test("the mobile UI keeps navigation and execution state within reach", async ()
   assert.match(pairing, /fetchPairJson/);
   assert.match(pairing, /requestNonce/);
   assert.match(browser, /Codex/);
-  assert.doesNotMatch(meta, /Claude Code/);
+  assert.match(meta, /Claude Code/);
   assert.match(conversation, /返回会话列表/);
   assert.match(conversation, /回复会持续显示在这里/);
   assert.match(conversation, /发送后会排到当前任务后/);

@@ -404,3 +404,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+.assistant-tabs { display: flex; gap: 6px; padding: 8px 14px; }
+.assistant-tabs button { flex: 1; padding: 9px 6px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: transparent; cursor: pointer; }
+.assistant-tabs button.active { background: var(--surface-muted); font-weight: 700; }
+.provider-dot.claude { background: #cc785c; }

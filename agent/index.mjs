@@ -15,9 +15,12 @@ import {
 import { openCodexSession, sendPrompt, sendToCodexSession, sendToCurrentCodex } from "./providers.mjs";
 import { getCodexStatus } from "./codex-status.mjs";
 import { CONTROL_URL, openControlPanel, startControlServer } from "./control-server.mjs";
-import { mergeTimelineMessages } from "../shared/messages.mjs";
+import { mergeTimelineMessages } from "./messages.mjs";
 import { writeAtomicJson } from "./persistence.mjs";
 import { RequestLedger } from "./request-ledger.mjs";
+import { sendClaudePrompt } from "./claude-runner.mjs";
+import { createClaudeSession } from "./claude-sessions.mjs";
+import { getClaudeStatus, getClaudeCapabilities, switchGlobalProvider } from "./claude-status.mjs";
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
@@ -214,6 +217,17 @@ const handledRequests = new RequestLedger(path.join(CONFIG_DIR, "requests.json")
 let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
 let activeCodexSessionId = null;
+let claudeLaunches = 0;
+let switchingClaudeProvider = false;
+async function startClaudeRun(session, prompt, settings, onEvent) {
+  if (switchingClaudeProvider) throw new Error("全局供应商正在切换，请等待确认后发送");
+  claudeLaunches += 1;
+  try {
+    const run = await sendClaudePrompt(session, prompt, settings, onEvent);
+    activeRuns.set(session.key, run);
+    return run;
+  } finally { claudeLaunches -= 1; }
+}
 const SUBSCRIPTION_TTL = 45_000;
 const ACTIVE_CLIENT_TTL = 90_000;
 
@@ -335,7 +349,7 @@ async function currentCodexDetail() {
 }
 
 async function sessionDetail(provider, sessionId) {
-  if (provider !== "codex") throw new Error("当前版本仅支持 Codex");
+  if (!["codex", "claude"].includes(provider)) throw new Error("不支持的会话类型");
   const session = await (provider === "codex" && sessionId === "__current__"
     ? currentCodexDetail()
     : getSession(provider, sessionId));
@@ -378,6 +392,28 @@ async function handleCommand(config, clientId, payload) {
     lastRequestType: payload?.type ?? "unknown",
   });
   try {
+    if (payload?.type === "claude:status:get") {
+      await sendBestEffort(config, clientId, { type: "claude:status", status: await getClaudeStatus() });
+      return;
+    }
+    if (payload?.type === "ccswitch:switch") {
+      if (switchingClaudeProvider || claudeLaunches || [...activeRuns.keys()].some((key) => key.startsWith("claude:"))) throw new Error("请先等待 Claude 任务结束，再切换全局供应商");
+      switchingClaudeProvider = true;
+      try {
+        const status = await switchGlobalProvider(String(payload.providerId ?? ""));
+        await sendRequestResponse(config, clientId, requestId, { type: "claude:status", status, switched: true });
+      } finally { switchingClaudeProvider = false; }
+      return;
+    }
+    if (payload?.type === "claude:create") {
+      const capabilities = await getClaudeCapabilities();
+      if (!capabilities.newSession) throw new Error("当前 Claude 版本不支持手机新建会话，请先升级");
+      const session = await createClaudeSession(payload.cwd);
+      invalidateSessions();
+      await sendRequestResponse(config, clientId, requestId, { type: "session:created", session });
+      await sendBestEffort(config, clientId, { type: "sessions:snapshot", sessions: await publicSessions() });
+      return;
+    }
     if (payload?.type === "sessions:ack") {
       clientActivity.set(clientId, {
         ...(clientActivity.get(clientId) ?? {}),
@@ -407,6 +443,7 @@ async function handleCommand(config, clientId, payload) {
       const sessions = await publicSessions();
       if (!payload.background) await sendBestEffort(config, clientId, { type: "sessions:loading", requestId, progress: 86, label: "正在整理项目" });
       await send(config, clientId, { type: "sessions:snapshot", requestId, sessions });
+      void getClaudeStatus().then((status) => sendBestEffort(config, clientId, { type: "claude:status", status })).catch(() => undefined);
       void getCodexStatus().then((status) => sendBestEffort(config, clientId, {
         type: "codex:status",
         requestId,
@@ -450,9 +487,9 @@ async function handleCommand(config, clientId, payload) {
     if (payload?.type === "session:send") {
       const prompt = String(payload.prompt ?? "").trim();
       if (!prompt || prompt.length > 12_000) throw new Error("指令需为 1–12000 个字符");
-      if (payload.provider !== "codex") throw new Error("当前版本仅支持 Codex");
+      if (!["codex", "claude"].includes(payload.provider)) throw new Error("不支持的会话类型");
       const settings = runSettings(payload);
-      if (process.platform === "win32" && payload.settings) {
+      if (payload.provider === "codex" && process.platform === "win32" && payload.settings) {
         const status = await getCodexStatus();
         const model = status.models.find((item) => item.model === settings.model);
         if (settings.model && !model) throw new Error("电脑当前不支持所选模型，请刷新模型列表");
@@ -504,13 +541,18 @@ async function handleCommand(config, clientId, payload) {
         await sendRequestResponse(config, clientId, requestId, { type: "run:status", requestId, sessionKey: key, status: "submitted" });
         return;
       }
-      const session = await getSession("codex", payload.sessionId);
+      const session = await getSession(payload.provider, payload.sessionId);
       const key = `${session.provider}:${session.id}`;
       await watchSession(config, clientId, session);
       if (activeRuns.has(key)) throw new Error("这个会话仍在执行，请等待或先停止");
-      activeCodexSessionId = session.id;
-      const managed = process.platform !== "win32";
-      const run = managed
+      if (session.provider === "codex") activeCodexSessionId = session.id;
+      const managed = session.provider === "claude" || process.platform !== "win32";
+      const run = session.provider === "claude"
+        ? await startClaudeRun(session, prompt, settings, (event) => {
+          if (event.type === "settings") return;
+          void sendBestEffort(config, clientId, { type: "run:event", requestId, sessionKey: key, event, at: Date.now() });
+        })
+        : managed
         ? sendPrompt(session, prompt, settings, (event) => {
           void send(config, clientId, {
             type: "run:event",
@@ -556,6 +598,7 @@ async function handleCommand(config, clientId, payload) {
     await sendRequestResponse(config, clientId, requestId, {
       type: "request:error",
       requestId,
+      sessionKey: payload?.provider && payload?.sessionId ? `${payload.provider}:${payload.sessionId}` : undefined,
       error: userFacingError(error),
     });
   }
@@ -627,10 +670,12 @@ async function controlState(config) {
 
 async function updateProviderHomes(config, body) {
   const codexHome = normalizeProviderHome("codex", body?.codexHome);
+  const claudeHome = normalizeProviderHome("claude", body?.claudeHome ?? config.claudeHome);
   if (codexHome.length > 1_000) throw new Error("目录路径过长");
   config.codexHome = codexHome;
-  delete config.claudeHome;
-  configureSessionRoots({ codexHome });
+  if (claudeHome.length > 1_000) throw new Error("目录路径过长");
+  config.claudeHome = claudeHome;
+  configureSessionRoots({ codexHome, claudeHome });
   await saveConfig(config);
   invalidateSessions();
   lastSessionSignature = "";
@@ -731,7 +776,7 @@ async function main() {
   }
   const config = await loadConfig();
   await handledRequests.load();
-  configureSessionRoots({ codexHome: config.codexHome });
+  configureSessionRoots({ codexHome: config.codexHome, claudeHome: config.claudeHome });
   for (const [clientId, client] of Object.entries(config.clients)) {
     if (client.watch?.key && client.watch?.provider && client.watch?.sessionId) {
       subscriptions.set(clientId, { ...client.watch, refreshedAt: Date.now() });
@@ -783,6 +828,7 @@ async function main() {
     const clients = Object.keys(config.clients).filter((id) => Date.now() - (clientActivity.get(id)?.lastRequestAt ?? 0) < ACTIVE_CLIENT_TTL);
     if (!clients.length) return;
     refreshingStatus = true;
+    void getClaudeStatus().then((status) => Promise.allSettled(clients.map((id) => sendBestEffort(config, id, { type: "claude:status", status })))).catch(() => undefined);
     void getCodexStatus(true).then((status) => Promise.allSettled(clients.map((id) => sendBestEffort(config, id, { type: "codex:status", status }))))
       .catch(() => undefined).finally(() => { refreshingStatus = false; });
   }, 60_000);

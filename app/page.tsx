@@ -3,6 +3,7 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConversationView, EmptyConversation } from "./components/conversation-view";
 import { CodexSettings } from "./components/codex-settings";
+import { ClaudeSettings } from "./components/claude-settings";
 import { PairingScreen } from "./components/pairing-screen";
 import { SessionLoader } from "./components/session-loader";
 import { SessionBrowser } from "./components/session-browser";
@@ -19,6 +20,8 @@ import {
 import type {
   DeviceStatus,
   CodexStatus,
+  ClaudeStatus,
+  Provider,
   Message,
   OutboxEntry,
   PollResponse,
@@ -42,6 +45,9 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeStatus | null>(null);
+  const [browserProvider, setBrowserProvider] = useState<Provider>("codex");
+  const [switchingProvider, setSwitchingProvider] = useState(false);
   const [settings, setSettings] = useState<RunSettings>({ model: "", reasoning: "", permission: "workspace", serviceTier: "" });
   const [settingsCustomized, setSettingsCustomized] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -211,6 +217,17 @@ export default function Home() {
       return;
     }
     if (payload.type === "codex:status:error") { setStatusError(String(payload.error ?? "用量暂不可用")); return; }
+    if (payload.type === "claude:status" && payload.status) {
+      setClaudeStatus((previous) => !previous || Number((payload.status as ClaudeStatus).updatedAt) >= previous.updatedAt ? payload.status as ClaudeStatus : previous);
+      if (payload.switched) { setSwitchingProvider(false); setSettingsCustomized(false); setToast("电脑的 Claude 全局供应商已切换"); }
+      return;
+    }
+    if (payload.type === "session:created" && payload.session) {
+      const session = payload.session as SessionSummary;
+      setSessions((previous) => [session, ...previous.filter((item) => item.key !== session.key)]);
+      setBrowserProvider(session.provider); setSelectedKey(session.key); setDraft(""); setSettingsCustomized(false);
+      return;
+    }
 
     if (payload.type === "sessions:snapshot" && Array.isArray(payload.sessions)) {
       setSessions(payload.sessions as SessionSummary[]);
@@ -319,6 +336,7 @@ export default function Home() {
     }
 
     if (payload.type === "request:error") {
+      setSwitchingProvider(false);
       if (payload.requestId) deliveryAcksRef.current.get(payload.requestId)?.();
       if (payload.requestId) updateOutbox(payload.requestId, { status: "failed", error: String(payload.error ?? "请求失败") });
       setToast(String(payload.error ?? "请求失败"));
@@ -453,8 +471,19 @@ export default function Home() {
     online: device.online || (agentContactAt > 0 && clock - agentContactAt < 180_000),
   } : null, [device, agentContactAt, clock]);
   const selectedSummary = sessions.find((session) => session.key === selectedKey) ?? null;
+  const activeProvider = selectedSummary?.provider ?? browserProvider;
   const selectedSessionId = selectedSummary?.id;
   const selectedProvider = selectedSummary?.provider;
+
+  useEffect(() => {
+    if (!switchingProvider) return;
+    const timer = setTimeout(() => {
+      setSwitchingProvider(false);
+      setToast("切换状态需要核实，正在读取电脑配置");
+      void remoteSend({ type: "claude:status:get", requestId: requestId() }).catch(() => undefined);
+    }, 40_000);
+    return () => clearTimeout(timer);
+  }, [switchingProvider, remoteSend]);
 
   useEffect(() => {
     if (!pairing || !selectedSessionId || !selectedProvider) return;
@@ -491,12 +520,13 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const sessionCount = useMemo(() => sessions.filter((session) => !session.currentWindow).length, [sessions]);
+  const sessionCount = useMemo(() => sessions.filter((session) => !session.currentWindow && session.provider === activeProvider).length, [sessions, activeProvider]);
 
   const projectGroups = useMemo<ProjectGroup[]>(() => {
     const needle = query.trim().toLowerCase();
     const matches = sessions
       .filter((session) => !session.currentWindow)
+      .filter((session) => session.provider === activeProvider)
       .filter((session) => !needle || `${session.title} ${session.cwd}`.toLowerCase().includes(needle));
     const map = new Map<string, ProjectGroup>();
     for (const session of matches) {
@@ -507,11 +537,11 @@ export default function Home() {
       map.set(path, group);
     }
     return [...map.values()].sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [sessions, query]);
+  }, [sessions, query, activeProvider]);
 
   const selectedDetail = selectedKey ? details[selectedKey] : null;
   const messages = selectedKey ? mergeSessionMessages(selectedDetail?.messages ?? [], liveMessages[selectedKey] ?? []) : [];
-  const desktopSettings = selectedDetail?.settings ?? codexStatus?.defaultSettings;
+  const desktopSettings = activeProvider === "claude" ? claudeStatus?.defaultSettings : selectedDetail?.settings ?? codexStatus?.defaultSettings;
   const effectiveSettings: RunSettings = settingsCustomized ? settings : desktopSettings ?? { model: "", reasoning: "", permission: "workspace", serviceTier: "" };
 
   async function deliverEntry(entry: OutboxEntry) {
@@ -542,7 +572,9 @@ export default function Home() {
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!selectedSummary || !draft.trim() || sending) return;
-    if (settingsCustomized && !codexStatus?.desktopSettingsOnly && settings.permission === "full" && !window.confirm("完全访问允许 Codex 操作工作区之外的文件。继续发送？")) return;
+    if (activeProvider === "claude" && selectedDetail?.terminalOpen) { setToast("请先退出电脑中的这个 Claude 会话，或在手机新建会话"); return; }
+    if (activeProvider === "claude" && !claudeStatus?.canSend) { setToast("当前 Claude 版本暂不支持发送，请查看运行设置"); return; }
+    if (settingsCustomized && (activeProvider === "claude" || !codexStatus?.desktopSettingsOnly) && settings.permission === "full" && !window.confirm("完全访问允许操作工作区之外的文件。继续发送？")) return;
     const prompt = draft.trim();
     const remoteRequestId = requestId();
     const remotePayload: RemotePayload = {
@@ -623,26 +655,38 @@ export default function Home() {
   }
 
   function refreshCodexStatus() {
+    if (activeProvider === "claude") {
+      void remoteSend({ type: "claude:status:get", requestId: requestId() }).catch(() => setToast("无法读取 Claude 状态"));
+      return;
+    }
     void remoteSend({ type: "codex:status:get", refresh: true, requestId: requestId() })
       .catch((error) => setToast(error instanceof Error ? error.message : "无法读取用量"));
   }
 
-  const selectedModel = codexStatus?.models.find((model) => model.model === effectiveSettings.model);
+  const selectedModel = (activeProvider === "claude" ? claudeStatus?.models : codexStatus?.models)?.find((model) => model.model === effectiveSettings.model);
 
   if (!hydrated) return <main className="loading-shell"><SessionLoader progress={12} label="正在启动 RelayDesk" /></main>;
   if (!pairing) return <PairingScreen onPaired={setPairing} />;
 
   return (
-    <main className={`app-shell ${selectedSummary ? "has-selection" : ""}`} data-provider="codex">
+    <main className={`app-shell ${selectedSummary ? "has-selection" : ""}`} data-provider={activeProvider}>
       <SessionBrowser
         sessionCount={sessionCount}
         device={visibleDevice}
         pairing={pairing}
         status={codexStatus}
+        claudeStatus={claudeStatus}
+        provider={activeProvider}
+        onProviderChange={(provider) => { setBrowserProvider(provider); setSelectedKey(null); setSettingsCustomized(false); }}
+        onNewClaude={() => {
+          const cwd = window.prompt("Claude 项目在电脑上的绝对路径", selectedSummary?.cwd || sessions.find((session) => session.provider === "claude")?.cwd || "");
+          if (!cwd?.trim()) return;
+          void remoteSend({ type: "claude:create", cwd: cwd.trim(), requestId: requestId() }).catch((error) => setToast(error instanceof Error ? error.message : "无法新建 Claude 会话"));
+        }}
         loading={sessionsLoading}
         loadingProgress={loadingProgress}
         loadingLabel={loadingLabel}
-        currentWindow={currentWindow}
+        currentWindow={activeProvider === "codex" ? currentWindow : undefined}
         selectedKey={selectedKey}
         query={query}
         projectGroups={projectGroups}
@@ -668,7 +712,7 @@ export default function Home() {
           settings={effectiveSettings}
           modelName={selectedModel?.displayName ?? effectiveSettings.model ?? "读取中"}
           connectionError={connectionError}
-          supportsStop={!codexStatus?.desktopSettingsOnly}
+          supportsStop={activeProvider === "claude" ? Boolean(selectedSummary.active || running[selectedSummary.key]) : !codexStatus?.desktopSettingsOnly}
           managedSettings={settingsCustomized}
           sending={sending}
           messageEndRef={messageEndRef}
@@ -690,9 +734,18 @@ export default function Home() {
           onKeyDown={keyDown}
           onStop={stopSession}
         />
-      ) : <EmptyConversation provider="codex" />}
+      ) : <EmptyConversation provider={activeProvider} />}
 
-      {settingsOpen ? <CodexSettings
+      {settingsOpen && activeProvider === "claude" ? <ClaudeSettings
+        status={claudeStatus} settings={effectiveSettings} customized={settingsCustomized} detail={selectedDetail} switching={switchingProvider}
+        onChange={(value) => { setSettings(value); setSettingsCustomized(true); }} onClose={() => setSettingsOpen(false)}
+        onRefresh={refreshCodexStatus} onFollow={() => setSettingsCustomized(false)}
+        onSwitch={(id, name) => {
+          if (!window.confirm(`将电脑上 Claude 的全局供应商切换为“${name}”？后续电脑和手机任务都会使用它。`)) return;
+          setSwitchingProvider(true);
+          void remoteSend({ type: "ccswitch:switch", providerId: id, requestId: requestId() }).catch(() => { setSwitchingProvider(false); setToast("切换请求尚未确认，请刷新状态核实"); });
+        }}
+      /> : settingsOpen ? <CodexSettings
         status={codexStatus}
         settings={effectiveSettings}
         error={statusError}

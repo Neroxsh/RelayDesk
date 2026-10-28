@@ -1,4 +1,4 @@
-const CACHE = "relaydesk-static-v7";
+const CACHE = "relaydesk-static-v8";
 
 self.addEventListener("install", () => {
   self.skipWaiting();
