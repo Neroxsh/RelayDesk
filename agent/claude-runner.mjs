@@ -12,6 +12,7 @@ const localRuns = new Set();
 
 export function claudeArgs(session, settings = {}, interactive = false) {
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(session.id)) throw new Error("Claude 会话 ID 无效");
+  if (settings.permission === "ask" && !interactive) throw new Error("这个 Claude 版本不支持手机逐次审批，请升级，或选择允许编辑权限");
   const args = ["-p", session.isNew ? "--session-id" : "--resume", session.id, "--output-format", "stream-json", "--verbose"];
   if (interactive) args.push("--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--allow-dangerously-skip-permissions");
   if (settings.model) {

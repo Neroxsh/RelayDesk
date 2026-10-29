@@ -78,7 +78,7 @@ export async function getClaudeStatus() {
   const mode = settings.permissions?.defaultMode;
   return {
     ...features, canSend: features.available && features.resume && features.stream && features.permissions,
-    models, defaultSettings: { model: settings.model || settings.env?.ANTHROPIC_MODEL || "sonnet", reasoning: settings.effortLevel || "", permission: mode === "bypassPermissions" ? "full" : mode === "plan" ? "read-only" : mode === "acceptEdits" ? "workspace" : "ask", serviceTier: "" },
+    models, defaultSettings: { model: settings.model || settings.env?.ANTHROPIC_MODEL || "sonnet", reasoning: settings.effortLevel || "", permission: mode === "bypassPermissions" ? "full" : mode === "plan" ? "read-only" : mode === "acceptEdits" || !features.interactive ? "workspace" : "ask", serviceTier: "" },
     ccSwitch: { ...cc, canSwitch: !reason, reason }, updatedAt: Date.now(),
   };
 }

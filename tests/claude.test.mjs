@@ -52,6 +52,8 @@ test("Claude execution uses a specific session and explicit permissions and neve
   assert.equal(claudeArgs({ id }, { permission: "full" }).includes("bypassPermissions"), true);
   assert.throws(() => claudeArgs({ id: "../session" }), /ID/);
   assert.throws(() => claudeArgs({ id }, { reasoning: "ultra" }), /思考/);
+  assert.throws(() => claudeArgs({ id }, { permission: "ask" }), /不支持手机逐次审批/);
+  assert.equal(claudeArgs({ id }, { permission: "ask" }, true).includes("default"), true);
   assert.equal(claudeEvent({ type: "assistant", message: { content: [{ type: "thinking", thinking: "secret" }] } }), null);
 });
 
