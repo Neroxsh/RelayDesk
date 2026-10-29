@@ -20,7 +20,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "command",
         nargs="?",
-        choices=("setup", "setup-ccswitch", "start", "control", "pair", "status"),
+        choices=("setup", "setup-claude", "setup-ccswitch", "start", "control", "pair", "status"),
         default="setup",
     )
     result.add_argument("--relay", default=os.environ.get("RELAYDESK_URL", DEFAULT_RELAY))
@@ -104,6 +104,7 @@ def main() -> int:
         print("  Status   running" if online() else "  Status   stopped")
         return 0 if online() else 1
     if args.command == "setup":
+        subprocess.run([node, str(agent), "setup-claude"], check=False)
         if sys.platform == "win32":
             install_startup(node, agent, relay)
         elif not online():

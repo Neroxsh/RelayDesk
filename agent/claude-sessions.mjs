@@ -23,7 +23,15 @@ export async function activeClaudeSessions() {
     try { const row = JSON.parse(await readFile(path.join(directory, file), "utf8")); process.kill(row.pid, 0); return row; }
     catch { return null; }
   }));
-  return rows.filter(Boolean);
+  const result = rows.filter(Boolean);
+  // New CLI storage revisions may no longer mirror every -p process into the
+  // legacy sessions directory. SessionStart supplies a separate local registry.
+  const captured = await readFile(path.join(process.env.RELAYDESK_STATE_DIR || path.join(os.homedir(), ".relaydesk"), "claude-live.json"), "utf8").then(JSON.parse).catch(() => ({}));
+  for (const row of Object.values(captured)) {
+    if (!row?.pid || path.resolve(row.home || claudeHome()) !== path.resolve(claudeHome()) || result.some((s) => s.pid === row.pid)) continue;
+    try { process.kill(row.pid, 0); result.push(row); } catch { /* Ended process. */ }
+  }
+  return result;
 }
 export async function createClaudeSession(cwd) {
   if (typeof cwd !== "string" || !path.isAbsolute(cwd) || !(await stat(cwd)).isDirectory()) throw new Error("请选择电脑上存在的项目绝对路径");
@@ -43,12 +51,14 @@ export function parseClaudeTranscript(rows) {
   for (const row of rows) {
     if (row.isSidechain) continue;
     const mode = row.permissionMode ?? (row.type === "permission-mode" ? row.permissionMode : null);
-    if (mode) permission = mode === "bypassPermissions" ? "full" : mode === "plan" ? "read-only" : "workspace";
+    if (mode) permission = mode === "bypassPermissions" ? "full" : mode === "plan" ? "read-only" : mode === "default" ? "ask" : "workspace";
     if (row.type !== "user" && row.type !== "assistant") continue;
     const content = row.message?.content;
     const blocks = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
-    const text = blocks.filter((block) => block.type === "text").map((block) => block.text).join("\n").trim();
-    if (text && !row.isMeta && !/^\s*<(?:local-command|command-name|system-reminder)/.test(text)) messages.push({
+    let text = blocks.filter((block) => block.type === "text").map((block) => block.text).join("\n").trim();
+    const relayPeer = row.type === "user" && row.origin?.kind === "peer" && row.origin?.from === "RelayDesk";
+    if (relayPeer) text = text.replace(/^Another Claude session sent a message:\n/, "").split("\n\nThis came from another Claude session")[0];
+    if (text && (!row.isMeta || relayPeer) && !/^\s*<(?:local-command|command-name|system-reminder)/.test(text)) messages.push({
       id: row.uuid ?? `${row.timestamp}-${row.type}-${messages.length}`, role: row.type === "user" ? "user" : "assistant", content: text.slice(0, 120_000), timestamp: row.timestamp ?? null,
     });
     if (row.type === "assistant" && row.message?.model && row.message.model !== "<synthetic>") settings = {

@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { sendDesktopPrompt } from "./desktop-bridge.mjs";
 
 const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -31,6 +32,8 @@ export function claudeExecutable() {
     return /\.[mc]?js$/i.test(configured) ? { command: process.execPath, prefix: [configured] } : { command: configured, prefix: [] };
   }
   if (process.platform !== "win32") return { command: "claude", prefix: [] };
+  const userNative = path.join(os.homedir(), ".local", "bin", "claude.exe");
+  if (fs.existsSync(userNative)) return { command: userNative, prefix: [] };
   const found = resolveOnWindows("claude");
   if (!found) throw new Error("没有找到 Claude Code，请先在电脑安装并登录");
   const native = path.join(path.dirname(found), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");

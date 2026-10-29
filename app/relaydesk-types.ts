@@ -12,7 +12,7 @@ export type ClaudeStatus = {
   ccSwitch: { available: boolean; schema: number | null; currentId: string; canSwitch: boolean; reason: string; providers: Array<{ id: string; name: string; current: boolean }> };
   updatedAt: number;
 };
-export type PermissionMode = "read-only" | "workspace" | "full";
+export type PermissionMode = "read-only" | "ask" | "workspace" | "full";
 
 export type CodexModel = {
   id: string;
@@ -102,7 +102,19 @@ export type ActivityItem = {
   timestamp?: string | null;
 };
 
+export type InteractionRequest = {
+  id: string; kind: "approval" | "question" | "notice"; title: string; description?: string; tool?: string;
+  choices: string[]; createdAt?: number;
+  questions?: Array<{ id: string; header?: string; question: string; multiSelect?: boolean; options?: Array<{ label: string; description?: string }> }>;
+};
+export type SessionControl = {
+  available: boolean; canSend?: boolean; canStop?: boolean; canSetPermissions?: boolean;
+  source?: string; reason?: string; pending?: InteractionRequest[];
+  planReady?: boolean; planId?: string;
+};
+
 export type SessionDetail = SessionSummary & {
+  control?: SessionControl | null;
   terminalOpen?: boolean;
   messages: Message[];
   activity?: ActivityItem[];

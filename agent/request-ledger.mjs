@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { writeAtomicJson } from "./persistence.mjs";
 
-const MUTATIONS = new Set(["session:send", "session:activate", "session:stop", "claude:create", "ccswitch:switch"]);
+const MUTATIONS = new Set(["session:send", "session:activate", "session:stop", "session:permission", "session:execute-plan", "interaction:respond", "claude:connect", "claude:create", "ccswitch:switch"]);
 const RETENTION = 24 * 60 * 60_000;
 
 export class RequestLedger {
@@ -29,6 +29,8 @@ export class RequestLedger {
     if (!MUTATIONS.has(payload?.type) || !payload?.requestId) return true;
     const key = `${clientId}:${payload.requestId}`;
     const fields = [payload.type, payload.provider, payload.sessionId, payload.prompt, payload.settings];
+    if (["session:permission", "interaction:respond"].includes(payload.type)) fields.push(payload.permission, payload.interactionId, payload.decision, payload.answers);
+    if (payload.type === "session:execute-plan") fields.push(payload.planId);
     if (["claude:create", "ccswitch:switch"].includes(payload.type)) fields.push(payload.providerId, payload.cwd);
     const fingerprint = createHash("sha256").update(JSON.stringify(fields)).digest("hex");
     const existing = this.records.get(key);

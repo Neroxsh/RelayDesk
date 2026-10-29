@@ -14,6 +14,8 @@ type CodexSettingsProps = {
   onClose: () => void;
   onRefresh: () => void;
   onUseDesktopSettings: () => void;
+  canSetPermissions?: boolean;
+  onPermission?: (permission: PermissionMode) => void;
 };
 
 const EFFORT_NAMES: Record<string, string> = {
@@ -42,7 +44,7 @@ function compactNumber(value: number) {
   return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
-export function CodexSettings({ status, settings, currentWindow, customized, error, onChange, onClose, onRefresh, onUseDesktopSettings }: CodexSettingsProps) {
+export function CodexSettings({ status, settings, currentWindow, customized, error, onChange, onClose, onRefresh, onUseDesktopSettings, canSetPermissions, onPermission }: CodexSettingsProps) {
   const models = status?.models ?? [];
   const selectedModel = models.find((model) => model.model === settings.model);
   const efforts = selectedModel?.supportedReasoningEfforts ?? [];
@@ -127,13 +129,13 @@ export function CodexSettings({ status, settings, currentWindow, customized, err
           </div>
         ) : null}
 
-        {!status?.desktopSettingsOnly ? <div className="settings-section">
+        {!status?.desktopSettingsOnly || canSetPermissions ? <div className="settings-section">
           <label>权限范围</label>
           <div className="permission-options">
             {PERMISSIONS.map((permission) => {
               const Icon = permission.icon;
               return (
-                <button key={permission.id} type="button" className={`${settings.permission === permission.id ? "active" : ""} ${permission.id === "full" ? "danger" : ""}`} onClick={() => onChange({ ...settings, permission: permission.id })}>
+                <button key={permission.id} type="button" className={`${settings.permission === permission.id ? "active" : ""} ${permission.id === "full" ? "danger" : ""}`} onClick={() => canSetPermissions ? onPermission?.(permission.id) : onChange({ ...settings, permission: permission.id })}>
                   <Icon size={18} /><span><strong>{permission.title}</strong><small>{permission.copy}</small></span>{settings.permission === permission.id ? <Check size={17} /> : null}
                 </button>
               );

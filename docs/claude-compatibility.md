@@ -6,6 +6,10 @@ RelayDesk 根据本机能力启用功能，不将所有版本视为兼容。Clau
 | --- | --- | --- | --- |
 | Claude 历史 | `.claude/projects` 的主会话 JSONL，忽略子代理与 thinking | Claude Code 2.1.197 的本机会话 | 不识别的文件不显示 |
 | 继续 Claude 会话 | 本机 `--help` 同时具备 print、resume、stream-json、dontAsk 和 allowedTools | 2.1.197 接口检测，模拟 CLI 的创建、恢复、错误与落盘回归 | 保留历史，提示升级，不发送 |
+| 连接已有 Claude 原进程 | 2.1.312+、SessionStart hook 捕获本机消息 socket、认证 token 和原进程身份；不另起同 ID 进程 | Windows 原生 2.1.312，真实 CLI + 本机模拟 Anthropic 接口，原进程连续收到两轮消息 | 未加载 hook 的旧终端需要退出后恢复一次；未知能力保留只读 |
+| Claude 审批、问题与计划 | SDK stream-json 双向控制；已有终端使用 PermissionRequest / PreToolUse hooks | 真实 2.1.312 CLI：问题回答、PowerShell 批准与拒绝、ExitPlanMode；仅在隔离目录执行 | 老 CLI 保留原有限后台能力，不伪造审批成功 |
+| Claude 任务权限 | SDK `set_permission_mode`，计划批准时使用会话级 setMode | 协议及回归测试；终端的原权限设置仍沿用电脑 | 独立终端不提供未经确认的直接模式切换 |
+| Codex 桌面确认与停止 | 桌面 client coordination 状态版本 11、原 owner 的 follower 请求 | 本机 26.1021.3705.0 真实只读连接；批准/拒绝/问题/去重使用隔离协议回归 | 其他版本未提供该协议时明确提示电脑处理，不启动竞争进程 |
 | 新建会话 | 另检测 `--session-id` | 2.1.197 接口、模拟 CLI 全流程 | 禁用新建入口 |
 | 思考强度 | 从 `--effort` 帮助段提取当前版本列出的档位 | 2.1.197；另覆盖没有 effort 的旧接口样本 | 隐藏选项，不传未知参数 |
 | CC Switch 供应商列表 | 只读 SQLite 和 `live-state.json`；路由模式显示实际路由供应商 | CC Switch 4.0.4 / schema 20 | 不改库，提示不可用 |
@@ -17,8 +21,9 @@ RelayDesk 根据本机能力启用功能，不将所有版本视为兼容。Clau
 
 1. 正常安装、登录并配置 Claude Code，电脑控制中心可指定 `.claude` 或 `projects` 目录。
 2. 手机切到 **Claude Code**，选择历史会话；或点 **新建 Claude 会话**，输入电脑上已有的项目绝对路径。
-3. 原会话如果仍在电脑终端打开，先退出该会话再从手机恢复。RelayDesk 不向已有黑窗口注入按键，也不同时启动两个写入同一会话的进程。手机的新任务在后台运行，可以在手机停止；停止按钮不会中断电脑上独立启动的 Claude。
-4. 默认只放行读取和编辑工具。命令执行可能被 Claude 拒绝，手机会显示权限提示；选择完全访问时，手机会再次确认。CLAUDE.md、hooks、插件、项目和用户配置沿用本机 Claude Code 的正常加载行为。
+3. 运行 `npm run setup:claude`（Python 用户使用 `relaydesk setup-claude`），安装手机连接 hooks。正常 `setup` 也会在检测到兼容 Claude 后尝试安装。保留已有 hooks 与供应商配置，并备份设置。已有终端需要退出后用 `claude --resume` 恢复一次原会话，以加载 hooks；之后手机可以给该原进程发消息，无需反复退出。第三方供应商通过本机消息 socket 接入，不依赖 Anthropic 官方 Remote Control 订阅。
+4. 手机打开该会话时，审批、问题选项和计划会显示确认卡片。电脑或手机处理后卡片失效；手机无活动连接、hook 异常或等待超时会退回 Claude 本身的处理，不自动批准。当前不代填登录验证与含敏感信息的复杂表单。
+5. 手机后台任务的默认权限跟随电脑 Claude 配置，未设置时使用标准审批。可在任务运行时切换计划、逐次询问、允许编辑或完全访问，完全访问需要明确点击确认。独立电脑终端的模型、思考与权限模式沿用该终端；计划批准可选择执行权限。Windows 在能确认原 Claude 进程和控制台时可向其发送 Esc 停止键，未检测到对应控制台则不显示停止能力。不会终止其父终端、注入任意命令，或同时启动第二个会话写入者。
 
 模型选项显示本机全局配置中的别名与实际映射。会话上一轮模型和下一条消息配置分别显示。CLI 支持某一 effort 不代表所有第三方模型都接受它，上游拒绝时仍会显示执行错误。第三方余额、Claude 订阅额度暂未接入，不借用 Codex 的用量。
 
@@ -43,3 +48,5 @@ Python 安装入口使用 `relaydesk setup-ccswitch`。两种入口使用同一�
 可通过电脑代理环境变量指定自定义安装位置：`CLAUDE_CONFIG_DIR`、`RELAYDESK_CLAUDE_EXECUTABLE`（原生程序或 npm CLI 的 JS 文件）、`CC_SWITCH_CONFIG_DIR`、`RELAYDESK_CC_SWITCH_CLI_PATH`。自定义路径仍需通过版本和 schema 核验。
 
 官方接口依据：[Claude Code 程序化使用](https://code.claude.com/docs/en/headless)、[CC Switch 对 CLI 的说明](https://github.com/farion1231/cc-switch#is-there-a-command-line-or-headless-version)。
+
+交互接口依据：[Claude 本机会话消息](https://code.claude.com/docs/en/cross-session-messaging)、[hooks](https://code.claude.com/docs/en/hooks)、[SDK 用户输入](https://code.claude.com/docs/en/agent-sdk/user-input)、[Codex app-server 审批](https://learn.chatgpt.com/docs/app-server)。桌面 client coordination 属于本机桌面实现，单独做版本校验；它不是稳定的公共 app-server 地址。

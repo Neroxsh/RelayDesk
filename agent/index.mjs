@@ -21,6 +21,9 @@ import { RequestLedger } from "./request-ledger.mjs";
 import { sendClaudePrompt } from "./claude-runner.mjs";
 import { createClaudeSession } from "./claude-sessions.mjs";
 import { getClaudeStatus, getClaudeCapabilities, switchGlobalProvider } from "./claude-status.mjs";
+import { codexControl } from "./codex-control.mjs";
+import { interactions } from "./interactions.mjs";
+import { claudeLiveStatus, sendClaudeLive, stopClaudeLive, installClaudeHooks, handleClaudeHook } from "./claude-live.mjs";
 
 const CONFIG_DIR = path.join(os.homedir(), ".relaydesk");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
@@ -213,6 +216,7 @@ async function send(config, clientId, payload) {
 const activeRuns = new Map();
 const subscriptions = new Map();
 const stableSnapshots = new Map();
+const sentSnapshotSignatures = new Map();
 const handledRequests = new RequestLedger(path.join(CONFIG_DIR, "requests.json"));
 let lastSessionSignature = "";
 let lastExternalSyncAt = 0;
@@ -249,6 +253,7 @@ function stableSessionSnapshot(session) {
 }
 
 function isRelayTimeout(error) {
+  if (error?.code === "DESKTOP_CONTROL_ERROR") return false;
   const message = error instanceof Error ? error.message : String(error ?? "");
   return /aborted|aborterror|timeout|timed out|中继服务返回\s*5\d\d|relay[^\n]*\s5\d\d/i.test(message);
 }
@@ -353,12 +358,22 @@ async function sessionDetail(provider, sessionId) {
   const session = await (provider === "codex" && sessionId === "__current__"
     ? currentCodexDetail()
     : getSession(provider, sessionId));
+  const sourceId = session.sourceSessionId || session.id;
+  if (provider === "codex") {
+    session.control = await codexControl.snapshot(sourceId).catch(() => ({ available: false, reason: "当前 Codex 桌面暂未提供控制连接" }));
+    if (session.control.settings) session.settings = session.control.settings;
+    if (session.control.working) session.state = "working";
+  } else {
+    const run = activeRuns.get(session.key);
+    session.control = run ? { available: true, canSend: false, canStop: true, canSetPermissions: run.canSetPermissions, source: "claude-managed", pending: interactions.list(session.id) } : await claudeLiveStatus(session.id);
+    if (run?.settings) session.settings = { ...session.settings, ...run.settings, source: "managed-live" };
+  }
   return stableSessionSnapshot(session);
 }
 
 function runSettings(payload) {
   const source = payload?.settings && typeof payload.settings === "object" ? payload.settings : {};
-  const permission = ["read-only", "workspace", "full"].includes(source.permission)
+  const permission = ["read-only", "ask", "workspace", "full"].includes(source.permission)
     ? source.permission
     : payload?.mode === "full" ? "full" : "workspace";
   return {
@@ -392,6 +407,41 @@ async function handleCommand(config, clientId, payload) {
     lastRequestType: payload?.type ?? "unknown",
   });
   try {
+    if (payload?.type === "session:execute-plan") {
+      if (payload.provider !== "codex") throw new Error("此操作仅用于 Codex 计划；Claude 请使用计划确认卡片");
+      const session = await sessionDetail("codex", payload.sessionId);
+      const id = session.sourceSessionId || session.id;
+      await codexControl.acceptPlan(id, payload.planId);
+      const run = sendToCodexSession(id, "请执行刚才确认的计划。");
+      await run.completed;
+      await sendRequestResponse(config, clientId, requestId, { type: "request:completed", sessionKey: session.key, message: "已确认执行计划，继续在原会话处理" });
+      return;
+    }
+    if (payload?.type === "claude:connect") {
+      const features = await getClaudeCapabilities();
+      if (!features.terminalControl) throw new Error("请先将 Claude Code 升级到 2.1.312 或更新版本");
+      await installClaudeHooks();
+      await sendRequestResponse(config, clientId, requestId, { type: "request:completed", message: "Claude 手机控制已安装。请在电脑重新打开原会话后连接。" });
+      return;
+    }
+    if (payload?.type === "interaction:respond" || payload?.type === "session:permission") {
+      const session = await sessionDetail(payload.provider, payload.sessionId);
+      const id = session.sourceSessionId || session.id;
+      if (payload.type === "interaction:respond") {
+        if (payload.provider === "codex") await codexControl.respond(id, String(payload.interactionId), payload.decision, payload.answers);
+        else interactions.respond(id, String(payload.interactionId), payload.decision, payload.answers, payload.permission);
+      } else {
+        if (payload.provider === "codex") await codexControl.setPermission(id, payload.permission);
+        else {
+          const run = activeRuns.get(session.key);
+          if (!run?.setPermission) throw new Error("这个 Claude 终端的权限需在电脑修改；手机启动的任务可实时调整");
+          await run.setPermission(payload.permission);
+        }
+      }
+      await sendRequestResponse(config, clientId, requestId, { type: "request:completed", sessionKey: session.key, message: payload.type === "interaction:respond" ? "已提交你的选择" : "电脑已应用权限设置" });
+      await sendBestEffort(config, clientId, { type: "session:snapshot", session: await sessionDetail(payload.provider, payload.sessionId) });
+      return;
+    }
     if (payload?.type === "claude:status:get") {
       await sendBestEffort(config, clientId, { type: "claude:status", status: await getClaudeStatus() });
       return;
@@ -478,10 +528,14 @@ async function handleCommand(config, clientId, payload) {
     if (payload?.type === "session:stop") {
       const key = `${payload.provider}:${payload.sessionId}`;
       const run = activeRuns.get(key);
-      if (!run) throw new Error("这个会话当前没有正在执行的任务");
-      if (run.supportsStop === false) throw new Error("桌面会话接口暂不支持中断任务，请在 Codex 电脑端停止");
-      run.stop();
-      await send(config, clientId, { type: "run:status", requestId, sessionKey: key, status: "stopping" });
+      if (payload.provider === "codex") {
+        const session = await sessionDetail(payload.provider, payload.sessionId);
+        await codexControl.stop(session.sourceSessionId || session.id);
+      } else {
+        if (run && run.supportsStop !== false) run.stop();
+        else await stopClaudeLive(payload.sessionId);
+      }
+      await sendRequestResponse(config, clientId, requestId, { type: "request:completed", sessionKey: key, message: "已请求停止任务" });
       return;
     }
     if (payload?.type === "session:send") {
@@ -489,6 +543,7 @@ async function handleCommand(config, clientId, payload) {
       if (!prompt || prompt.length > 12_000) throw new Error("指令需为 1–12000 个字符");
       if (!["codex", "claude"].includes(payload.provider)) throw new Error("不支持的会话类型");
       const settings = runSettings(payload);
+      if (payload.provider === "claude" && !payload.settings) settings.permission = (await getClaudeStatus()).defaultSettings.permission;
       if (payload.provider === "codex" && process.platform === "win32" && payload.settings) {
         const status = await getCodexStatus();
         const model = status.models.find((item) => item.model === settings.model);
@@ -544,6 +599,19 @@ async function handleCommand(config, clientId, payload) {
       const session = await getSession(payload.provider, payload.sessionId);
       const key = `${session.provider}:${session.id}`;
       await watchSession(config, clientId, session);
+      if (session.provider === "claude" && session.terminalOpen) {
+        if (payload.settings) throw new Error("连接原终端时沿用该终端的模型和权限，请切换为跟随电脑后发送");
+        const delivery = await sendClaudeLive(session, prompt);
+        const deadline = Date.now() + 10000;
+        let confirmed = false;
+        while (!confirmed && Date.now() < deadline) {
+          const latest = await getSession("claude", session.id);
+          confirmed = latest.messages.some((m) => m.id === delivery.uuid);
+          if (!confirmed) await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        await sendRequestResponse(config, clientId, requestId, { type: "run:status", sessionKey: key, status: confirmed ? "submitted" : "uncertain", ...(confirmed ? {} : { error: "消息已写入 Claude，等待原进程处理；请勿重复发送" }), mode: "window" });
+        return;
+      }
       if (activeRuns.has(key)) throw new Error("这个会话仍在执行，请等待或先停止");
       if (session.provider === "codex") activeCodexSessionId = session.id;
       const managed = session.provider === "claude" || process.platform !== "win32";
@@ -585,7 +653,7 @@ async function handleCommand(config, clientId, payload) {
           await sendBestEffort(config, clientId, {
             type: "session:snapshot",
             requestId,
-            session: stableSessionSnapshot(updated),
+            session: await sessionDetail(session.provider, session.id),
           });
         }
         await sendBestEffort(config, clientId, { type: "sessions:snapshot", requestId, sessions: await publicSessions() });
@@ -743,7 +811,7 @@ async function syncExternalChanges(config) {
   invalidateSessions();
   const sessions = await publicSessions();
   const signature = sessions.map((session) => `${session.key}:${Math.trunc(session.updatedAt)}`).join("|");
-  if (signature === lastSessionSignature) return;
+  const sessionsChanged = signature !== lastSessionSignature;
   lastSessionSignature = signature;
   const current = Date.now();
   const clientIds = Object.keys(config.clients).filter((clientId) => {
@@ -752,7 +820,7 @@ async function syncExternalChanges(config) {
     return Number(activity?.lastRequestAt || 0) >= current - ACTIVE_CLIENT_TTL
       || Number(subscription?.refreshedAt || 0) >= current - SUBSCRIPTION_TTL;
   });
-  await Promise.allSettled(
+  if (sessionsChanged) await Promise.allSettled(
     clientIds.map((clientId) => send(config, clientId, { type: "sessions:snapshot", sessions })),
   );
   await Promise.allSettled(
@@ -764,7 +832,10 @@ async function syncExternalChanges(config) {
         return;
       }
       const detail = await sessionDetail(subscription.provider, subscription.sessionId);
+      const detailSignature = sha256(JSON.stringify(detail));
+      if (sentSnapshotSignatures.get(clientId) === detailSignature) return;
       await send(config, clientId, { type: "session:snapshot", session: detail });
+      sentSnapshotSignatures.set(clientId, detailSignature);
     }),
   );
 }
@@ -777,6 +848,14 @@ async function main() {
   const config = await loadConfig();
   await handledRequests.load();
   configureSessionRoots({ codexHome: config.codexHome, claudeHome: config.claudeHome });
+  if (command === "setup-claude") {
+    const features = await getClaudeCapabilities();
+    if (!features.available) { console.log("未安装 Claude Code，已跳过 Claude 手机控制；Codex 不受影响。"); return; }
+    if (!features.terminalControl) throw new Error("Claude 终端手机控制需要 Claude Code 2.1.312 或更新版本，请先运行 claude update");
+    await installClaudeHooks();
+    console.log("Claude 手机控制已安装。已打开的终端请退出后用 claude --resume 恢复原会话。");
+    return;
+  }
   for (const [clientId, client] of Object.entries(config.clients)) {
     if (client.watch?.key && client.watch?.provider && client.watch?.sessionId) {
       subscriptions.set(clientId, { ...client.watch, refreshedAt: Date.now() });
@@ -799,7 +878,7 @@ async function main() {
     return;
   }
   if (command !== "start") {
-    console.error("可用命令：start、pair、control");
+    console.error("可用命令：start、pair、control、setup-claude");
     process.exitCode = 2;
     return;
   }
@@ -812,6 +891,7 @@ async function main() {
     reject: async (body) => rejectPair(config, body),
     revoke: async (body) => revokeClient(config, body),
     updateSettings: async (body) => updateProviderHomes(config, body),
+    claudeHook: async (body, signal) => handleClaudeHook(body, { signal, mobileActive: (sessionId) => [...subscriptions.entries()].some(([id, sub]) => sub.provider === "claude" && sub.sessionId === sessionId && Date.now() - (clientActivity.get(id)?.lastRequestAt ?? 0) < ACTIVE_CLIENT_TTL) }),
   });
   console.log(`电脑控制中心：${CONTROL_URL}`);
 

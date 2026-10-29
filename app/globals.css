@@ -1,3 +1,27 @@
+.interaction-card { margin: 18px 0; padding: 16px; border: 1px solid var(--line, #65512e); border-radius: 16px; background: var(--surface-muted); color: var(--ink); }
+.interaction-card header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.interaction-card header > span { margin-left: auto; font-size: 11px; color: var(--muted); }
+.interaction-description { max-height: 340px; overflow: auto; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.interaction-description p { margin: 8px 0; white-space: pre-line; }
+.interaction-description h3 { margin: 10px 0; }
+.interaction-description ol, .interaction-description ul { margin: 8px 0; padding-left: 22px; }
+.interaction-description li { margin: 5px 0; }
+.interaction-description pre { overflow: auto; }
+.interaction-card fieldset { border: 0; padding: 0; margin: 12px 0; min-width: 0; }
+.interaction-card legend { font-size: 14px; margin-bottom: 10px; }
+.interaction-options { display: grid; gap: 8px; }
+.interaction-options button { text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--surface); color: inherit; }
+.interaction-options button.selected { border-color: var(--ink); background: var(--surface-strong); }
+.interaction-options small { display: block; margin-top: 4px; opacity: .7; line-height: 1.4; }
+.interaction-card textarea { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: inherit; resize: vertical; font: inherit; font-size: 14px; }
+.interaction-card footer { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 12px; }
+.interaction-card footer button { padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: var(--surface); }
+.interaction-card footer button.primary { color: var(--surface); background: var(--ink); }
+.interaction-card button:disabled { opacity: .5; cursor: wait; }
+.interaction-card footer > span { display: flex; align-items: center; gap: 6px; width: 100%; font-size: 12px; }
+.plan-permission { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; font-size: 13px; }
+.plan-permission select { background: var(--surface); color: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 8px; max-width: 75%; }
+
 :root {
   color-scheme: light;
   --page: #f4f4f1;

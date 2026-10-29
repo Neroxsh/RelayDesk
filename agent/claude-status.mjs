@@ -17,7 +17,9 @@ let capabilities;
 export function parseClaudeCapabilities(help, version) {
   const effortText = help.match(/--effort\b[\s\S]*?(?=\n\s*--|$)/)?.[0] ?? "";
   const reasoningEfforts = ["low", "medium", "high", "xhigh", "max"].filter((value) => new RegExp(`\\b${value}\\b`).test(effortText));
-  return { available: true, version: version.trim(), resume: /--resume\b/.test(help), newSession: /--session-id\b/.test(help), stream: /--print\b/.test(help) && /--output-format\b/.test(help) && /stream-json/.test(help), effort: reasoningEfforts.length > 0, reasoningEfforts, permissions: /--permission-mode\b/.test(help) && /dontAsk/.test(help) && /--allowedTools\b/.test(help) };
+  const parts = version.match(/(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number) ?? [0, 0, 0];
+  const atLeast = (patch) => parts[0] > 2 || (parts[0] === 2 && (parts[1] > 1 || (parts[1] === 1 && parts[2] >= patch)));
+  return { available: true, version: version.trim(), resume: /--resume\b/.test(help), newSession: /--session-id\b/.test(help), stream: /--print\b/.test(help) && /--output-format\b/.test(help) && /stream-json/.test(help), effort: reasoningEfforts.length > 0, reasoningEfforts, permissions: /--permission-mode\b/.test(help) && /dontAsk/.test(help) && /--allowedTools\b/.test(help), interactive: /--input-format\b/.test(help) && /--allow-dangerously-skip-permissions\b/.test(help) && /stream-json/.test(help), liveMessaging: atLeast(248), terminalControl: atLeast(312) };
 }
 export async function getClaudeCapabilities() {
   if (capabilities && Date.now() - capabilities.at < 300_000) return capabilities.value;
@@ -73,9 +75,10 @@ export async function getClaudeStatus() {
   const [features, settings, cc] = await Promise.all([getClaudeCapabilities(), jsonFile(path.join(claudeHome(), "settings.json")), readCcSwitchState()]);
   const models = publicClaudeModels(settings);
   const reason = await ccSwitchReadiness(cc);
+  const mode = settings.permissions?.defaultMode;
   return {
     ...features, canSend: features.available && features.resume && features.stream && features.permissions,
-    models, defaultSettings: { model: settings.model || settings.env?.ANTHROPIC_MODEL || "sonnet", reasoning: settings.effortLevel || "", permission: "workspace", serviceTier: "" },
+    models, defaultSettings: { model: settings.model || settings.env?.ANTHROPIC_MODEL || "sonnet", reasoning: settings.effortLevel || "", permission: mode === "bypassPermissions" ? "full" : mode === "plan" ? "read-only" : mode === "acceptEdits" ? "workspace" : "ask", serviceTier: "" },
     ccSwitch: { ...cc, canSwitch: !reason, reason }, updatedAt: Date.now(),
   };
 }

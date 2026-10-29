@@ -26,6 +26,9 @@ test("Claude feature detection keeps old clients usable without inventing an eff
   const modern = parseClaudeCapabilities(`${oldHelp}\n--effort <level> (low, medium, high)\n--file`, "2.1.0");
   assert.deepEqual(modern.reasoningEfforts, ["low", "medium", "high"]);
   assert.equal(parseClaudeCapabilities("--resume --print", "1.0").stream, false);
+  assert.equal(parseClaudeCapabilities(oldHelp, "2.2.0").terminalControl, true);
+  assert.equal(parseClaudeCapabilities(oldHelp, "3.0.0").liveMessaging, true);
+  assert.equal(parseClaudeCapabilities(oldHelp, "2.1.311").terminalControl, false);
 });
 
 test("Claude history excludes thinking, tools' raw output and sidechain messages", () => {

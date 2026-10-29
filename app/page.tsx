@@ -4,6 +4,7 @@ import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useS
 import { ConversationView, EmptyConversation } from "./components/conversation-view";
 import { CodexSettings } from "./components/codex-settings";
 import { ClaudeSettings } from "./components/claude-settings";
+import type { InteractionAnswer } from "./components/interaction-card";
 import { PairingScreen } from "./components/pairing-screen";
 import { SessionLoader } from "./components/session-loader";
 import { SessionBrowser } from "./components/session-browser";
@@ -60,6 +61,7 @@ export default function Home() {
   const [connectionError, setConnectionError] = useState("");
   const [statusError, setStatusError] = useState("");
   const [sending, setSending] = useState(false);
+  const [respondingIds, setRespondingIds] = useState<string[]>([]);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   const cursorRef = useRef(0);
@@ -74,6 +76,7 @@ export default function Home() {
   const seenEventsRef = useRef(new Set<string>());
   const queryPendingRef = useRef<(() => void) | null>(null);
   const transportCountRef = useRef(0);
+  const actionRequestsRef = useRef(new Map<string, { interactionId?: string; timer: ReturnType<typeof setTimeout> }>());
 
   const updateOutbox = useCallback((id: string, patch?: Partial<OutboxEntry>, remove = false) => {
     const entry = outboxRef.current.get(id);
@@ -292,6 +295,12 @@ export default function Home() {
       return;
     }
 
+    if (payload.type === "request:completed") {
+      const action = actionRequestsRef.current.get(String(payload.requestId));
+      if (action) { clearTimeout(action.timer); actionRequestsRef.current.delete(String(payload.requestId)); setRespondingIds((v) => v.filter((id) => id !== action.interactionId)); }
+      setToast(String(payload.message ?? "电脑已处理"));
+      return;
+    }
     if (payload.type === "run:event" && payload.sessionKey && payload.event) {
       const event = payload.event as { type?: string; text?: string };
       const role = event.type === "assistant" ? "assistant" : "tool";
@@ -336,6 +345,8 @@ export default function Home() {
     }
 
     if (payload.type === "request:error") {
+      const action = actionRequestsRef.current.get(String(payload.requestId));
+      if (action) { clearTimeout(action.timer); actionRequestsRef.current.delete(String(payload.requestId)); setRespondingIds((v) => v.filter((id) => id !== action.interactionId)); }
       setSwitchingProvider(false);
       if (payload.requestId) deliveryAcksRef.current.get(payload.requestId)?.();
       if (payload.requestId) updateOutbox(payload.requestId, { status: "failed", error: String(payload.error ?? "请求失败") });
@@ -541,8 +552,9 @@ export default function Home() {
 
   const selectedDetail = selectedKey ? details[selectedKey] : null;
   const messages = selectedKey ? mergeSessionMessages(selectedDetail?.messages ?? [], liveMessages[selectedKey] ?? []) : [];
-  const desktopSettings = activeProvider === "claude" ? claudeStatus?.defaultSettings : selectedDetail?.settings ?? codexStatus?.defaultSettings;
-  const effectiveSettings: RunSettings = settingsCustomized ? settings : desktopSettings ?? { model: "", reasoning: "", permission: "workspace", serviceTier: "" };
+  const desktopSettings = activeProvider === "claude" ? (selectedDetail?.terminalOpen || selectedDetail?.control?.source === "claude-managed") ? selectedDetail.settings ?? claudeStatus?.defaultSettings : claudeStatus?.defaultSettings : selectedDetail?.settings ?? codexStatus?.defaultSettings;
+  const chosenSettings: RunSettings = settingsCustomized ? settings : desktopSettings ?? { model: "", reasoning: "", permission: "workspace", serviceTier: "" };
+  const effectiveSettings: RunSettings = { ...chosenSettings, ...(selectedDetail?.control?.canSetPermissions && selectedDetail.settings?.permission ? { permission: selectedDetail.settings.permission } : {}) };
 
   async function deliverEntry(entry: OutboxEntry) {
     const acknowledgement = new Promise<boolean>((resolve) => deliveryAcksRef.current.set(entry.requestId, () => resolve(true)));
@@ -572,7 +584,8 @@ export default function Home() {
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!selectedSummary || !draft.trim() || sending) return;
-    if (activeProvider === "claude" && selectedDetail?.terminalOpen) { setToast("请先退出电脑中的这个 Claude 会话，或在手机新建会话"); return; }
+    if (activeProvider === "claude" && selectedDetail?.terminalOpen && !selectedDetail.control?.canSend) { setToast("请先启用手机接入，并在电脑重新打开原会话"); return; }
+    if (activeProvider === "claude" && selectedDetail?.terminalOpen && settingsCustomized) { setToast("连接原终端时请先选择跟随电脑"); return; }
     if (activeProvider === "claude" && !claudeStatus?.canSend) { setToast("当前 Claude 版本暂不支持发送，请查看运行设置"); return; }
     if (settingsCustomized && (activeProvider === "claude" || !codexStatus?.desktopSettingsOnly) && settings.permission === "full" && !window.confirm("完全访问允许操作工作区之外的文件。继续发送？")) return;
     const prompt = draft.trim();
@@ -644,6 +657,28 @@ export default function Home() {
       .catch((error) => setToast(error instanceof Error ? error.message : "无法停止任务"));
   }
 
+  function sendAction(payload: RemotePayload, interactionId?: string) {
+    if (!selectedSummary) return;
+    const id = requestId();
+    if (interactionId) setRespondingIds((v) => [...v, interactionId]);
+    const timer = setTimeout(() => {
+      actionRequestsRef.current.delete(id);
+      setRespondingIds((v) => v.filter((value) => value !== interactionId));
+      setToast("正在核实电脑处理结果，请查看最新会话后操作");
+      void remoteSend({ type: "request:status", originalRequestId: id, requestId: requestId() }).catch(() => undefined);
+      void remoteSend({ type: "session:get", provider: selectedSummary.provider, sessionId: selectedSummary.id, requestId: requestId() }).catch(() => undefined);
+    }, 30000);
+    actionRequestsRef.current.set(id, { interactionId, timer });
+    void remoteSend({ ...payload, provider: selectedSummary.provider, sessionId: selectedSummary.id, requestId: id }).catch(() => {
+      clearTimeout(timer); actionRequestsRef.current.delete(id); setRespondingIds((v) => v.filter((value) => value !== interactionId)); setToast("提交暂未确认，请刷新会话查看结果");
+    });
+  }
+  function respondInteraction(id: string, answer: InteractionAnswer) { sendAction({ type: "interaction:respond", interactionId: id, ...answer }, id); }
+  function setLivePermission(permission: RunSettings["permission"]) {
+    if (permission === "full" && !window.confirm("允许此会话完全访问本机文件并执行命令，继续？")) return;
+    sendAction({ type: "session:permission", permission });
+  }
+
   function refreshWorkspace() {
     setSessionsLoading(true);
     setLoadingProgress(10);
@@ -712,7 +747,11 @@ export default function Home() {
           settings={effectiveSettings}
           modelName={selectedModel?.displayName ?? effectiveSettings.model ?? "读取中"}
           connectionError={connectionError}
-          supportsStop={activeProvider === "claude" ? Boolean(selectedSummary.active || running[selectedSummary.key]) : !codexStatus?.desktopSettingsOnly}
+          supportsStop={selectedDetail?.control?.canStop ?? (activeProvider === "claude" ? Boolean(selectedSummary.active || running[selectedSummary.key]) && !selectedDetail?.terminalOpen : !codexStatus?.desktopSettingsOnly)}
+          respondingIds={respondingIds}
+          onRespond={respondInteraction}
+          onConnectClaude={() => sendAction({ type: "claude:connect" })}
+          onExecutePlan={() => sendAction({ type: "session:execute-plan", planId: selectedDetail?.control?.planId }, "execute-plan")}
           managedSettings={settingsCustomized}
           sending={sending}
           messageEndRef={messageEndRef}
@@ -740,6 +779,7 @@ export default function Home() {
         status={claudeStatus} settings={effectiveSettings} customized={settingsCustomized} detail={selectedDetail} switching={switchingProvider}
         onChange={(value) => { setSettings(value); setSettingsCustomized(true); }} onClose={() => setSettingsOpen(false)}
         onRefresh={refreshCodexStatus} onFollow={() => setSettingsCustomized(false)}
+        onPermission={setLivePermission}
         onSwitch={(id, name) => {
           if (!window.confirm(`将电脑上 Claude 的全局供应商切换为“${name}”？后续电脑和手机任务都会使用它。`)) return;
           setSwitchingProvider(true);
@@ -755,6 +795,8 @@ export default function Home() {
         onClose={() => setSettingsOpen(false)}
         onRefresh={refreshCodexStatus}
         onUseDesktopSettings={() => setSettingsCustomized(false)}
+        canSetPermissions={Boolean(selectedDetail?.control?.canSetPermissions)}
+        onPermission={setLivePermission}
       /> : null}
 
       {toast ? <div className="toast" role="status">{toast}</div> : null}

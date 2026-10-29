@@ -16,6 +16,7 @@ import {
 import { formatMessageTime, providerName } from "../relaydesk-meta";
 import type { DeviceStatus, Message, RunSettings, SessionDetail, SessionSummary } from "../relaydesk-types";
 import { ProviderIcon } from "./provider-icon";
+import { InteractionCard, type InteractionAnswer } from "./interaction-card";
 
 type ConversationViewProps = {
   session: SessionSummary;
@@ -30,6 +31,10 @@ type ConversationViewProps = {
   sending: boolean;
   connectionError?: string;
   supportsStop?: boolean;
+  respondingIds?: string[];
+  onRespond: (id: string, value: InteractionAnswer) => void;
+  onConnectClaude: () => void;
+  onExecutePlan: () => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
   onBack: () => void;
   onDraftChange: (value: string) => void;
@@ -54,6 +59,7 @@ export function ConversationView({
   sending,
   connectionError,
   supportsStop,
+  respondingIds = [], onRespond, onConnectClaude, onExecutePlan,
   messageEndRef,
   onBack,
   onDraftChange,
@@ -65,7 +71,7 @@ export function ConversationView({
   onStop,
 }: ConversationViewProps) {
   const transcriptWorking = detail?.state === "working";
-  const isWorking = Boolean(runningStatus) || transcriptWorking;
+  const isWorking = Boolean(runningStatus) || transcriptWorking || Boolean(detail?.control?.pending?.length);
   const waiting = runningStatus === "waiting";
   const deliveryCopy = runningStatus === "sending"
     ? "正在发送到电脑"
@@ -77,7 +83,8 @@ export function ConversationView({
         ? `${providerName(session.provider)} 正在思考`
         : "正在继续回复";
   // Desktop conversations accept follow-up input while the active turn is running.
-  const submitLocked = sending || (session.provider === "claude" && (isWorking || Boolean(detail?.terminalOpen)));
+  const submitLocked = sending || (session.provider === "claude" && ((detail?.terminalOpen && !detail.control?.canSend) || (!detail?.terminalOpen && isWorking)));
+  const pending = detail?.control?.pending ?? [];
   const activity = detail?.activity ?? [];
 
   return (
@@ -88,7 +95,7 @@ export function ConversationView({
           <strong>{session.currentWindow ? "继续上次会话" : session.title}</strong>
           <span><ProviderIcon provider={session.provider} size={15} />{providerName(session.provider)}</span>
         </div>
-        {isWorking && supportsStop && !session.currentWindow ? (
+        {isWorking && supportsStop ? (
           <button className="stop-button" type="button" onClick={onStop}><CircleStop size={15} /><span>停止</span></button>
         ) : (
           <span className={`connection-state ${device?.online ? "online" : ""}`}><i />{device?.online ? (isWorking ? "进行中" : "已同步") : "离线"}</span>
@@ -135,7 +142,10 @@ export function ConversationView({
           </article>
         ))}
 
-        {isWorking ? (
+        {pending.map((request) => <InteractionCard key={request.id} request={request} busy={respondingIds.includes(request.id)} onRespond={(answer) => onRespond(request.id, answer)} />)}
+        {detail?.control?.planReady ? <section className="interaction-card"><header><strong>计划已完成</strong></header><p>确认后，Codex 会切换到执行模式，继续当前会话。</p><footer><button className="primary" type="button" disabled={respondingIds.includes("execute-plan")} onClick={onExecutePlan}>{respondingIds.includes("execute-plan") ? "正在提交…" : "执行计划"}</button></footer></section> : null}
+
+        {isWorking && !pending.length ? (
           <div className="reply-pulse" role="status" aria-live="polite">
             <ProviderIcon provider={session.provider} size={18} />
             <span className="reply-pulse-dots" aria-hidden="true"><i /><i /><i /></span>
@@ -146,7 +156,7 @@ export function ConversationView({
       </div>
 
       <form className="composer" onSubmit={onSubmit}>
-        {session.provider === "claude" && detail?.terminalOpen ? <p className="settings-notice">这个会话正在电脑终端打开。先退出该会话再从手机继续，或在手机新建会话。</p> : null}
+        {session.provider === "claude" && detail?.terminalOpen ? <p className="settings-notice">{detail.control?.reason}{!detail.control?.canSend ? <button type="button" onClick={onConnectClaude}>启用手机接入</button> : null}</p> : null}
         <div className="composer-meta">
           <button className="run-settings-button" type="button" onClick={onOpenSettings}>
             {session.currentWindow ? <Terminal size={14} /> : <SlidersHorizontal size={14} />}

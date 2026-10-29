@@ -93,6 +93,9 @@ async function main() {
     return;
   }
 
+  const claudeSetup = spawnSync(process.execPath, [agent, "setup-claude"], { cwd: projectRoot, windowsHide: true, stdio: "inherit" });
+  if (claudeSetup.status !== 0) console.log("Claude 手机接入尚未启用；升级 Claude 后运行 npm run setup:claude。Codex 安装继续。");
+
   if (process.platform === "win32" && automatic) {
     const result = spawnSync("powershell.exe", [
       "-NoProfile",

@@ -19,11 +19,11 @@ function reply(response, status, body, type = "application/json; charset=utf-8")
   response.end(typeof body === "string" ? body : JSON.stringify(body));
 }
 
-async function readBody(request) {
+async function readBody(request, maxBytes = 16000) {
   let value = "";
   for await (const chunk of request) {
     value += chunk.toString("utf8");
-    if (value.length > 16_000) throw new Error("请求内容过大");
+    if (value.length > maxBytes) throw new Error("请求内容过大");
   }
   return value ? JSON.parse(value) : {};
 }
@@ -32,7 +32,7 @@ function isLoopback(address) {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
-export async function startControlServer({ controlToken, getState, approve, reject, revoke, updateSettings }) {
+export async function startControlServer({ controlToken, getState, approve, reject, revoke, updateSettings, claudeHook }) {
   const template = await readFile(CONTROL_HTML, "utf8");
   const server = http.createServer(async (request, response) => {
     try {
@@ -47,6 +47,13 @@ export async function startControlServer({ controlToken, getState, approve, reje
       }
       if (request.headers["x-relaydesk-control"] !== controlToken) {
         reply(response, 403, { error: "本机控制认证失败" });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/claude/hook" && claudeHook) {
+        const controller = new AbortController();
+        response.once("close", () => controller.abort());
+        const result = await claudeHook(await readBody(request, 512000), controller.signal);
+        if (!response.destroyed) reply(response, 200, result);
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/state") {

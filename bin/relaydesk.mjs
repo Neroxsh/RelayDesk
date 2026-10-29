@@ -12,7 +12,7 @@ const args = process.argv.slice(3);
 
 const target = command === "setup"
   ? [setup, ...args]
-  : [agent, ["start", "control", "pair"].includes(command) ? command : "start", ...args];
+  : [agent, ["start", "control", "pair", "setup-claude"].includes(command) ? command : "start", ...args];
 
 const child = spawn(process.execPath, target, { cwd: root, stdio: "inherit", windowsHide: false });
 child.once("exit", (code) => { process.exitCode = code ?? 1; });
