@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
-import { InteractionBroker, claudeDecision } from "../agent/interactions.mjs";
+import { InteractionBroker, claudeDecision, publicInteraction } from "../agent/interactions.mjs";
 import { CodexControl, applyDesktopPatches, codexPendingRequests } from "../agent/codex-control.mjs";
 import { installClaudeHooks, claudeHookSettings } from "../agent/claude-live.mjs";
 import { configureClaudeHome, parseClaudeTranscript } from "../agent/claude-sessions.mjs";
@@ -46,6 +46,10 @@ test("desktop patches preserve arrays and reject prototype pollution and missing
 });
 
 test("only supported desktop approvals are offered and verification secrets stay on the computer", () => {
+  assert.match(publicInteraction("cmd", id, "PowerShell", { description: "Run a test", command: "actual-command --specific-argument" }).description, /actual-command --specific-argument/);
+  assert.match(publicInteraction("edit", id, "Edit", { file_path: "a.txt", old_string: "before", new_string: "after" }).description, /before[\s\S]*after/);
+  const file = codexPendingRequests({ cwd: "project", turns: [{ items: [{ id: "f", changes: [{ path: "a.txt", diff: "-before\n+after" }] }] }], requests: [{ id: 1, method: "item/fileChange/requestApproval", params: { itemId: "f" } }] })[0];
+  assert.match(file.description, /a\.txt[\s\S]*-before[\s\S]*\+after/);
   const requests = codexPendingRequests({ requests: [
     { id: 17, method: "item/commandExecution/requestApproval", params: { command: "npm test", availableDecisions: ["accept", "decline"] } },
     { id: 18, method: "item/tool/requestUserInput", params: { questions: [{ id: "q", isSecret: true, question: "Password" }] } },

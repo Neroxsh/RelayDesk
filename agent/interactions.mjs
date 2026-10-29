@@ -3,9 +3,12 @@ import { EventEmitter } from "node:events";
 
 export function publicInteraction(id, sessionId, tool, input, source = "claude") {
   const questions = tool === "AskUserQuestion" ? (input.questions ?? []).map((q, index) => ({ id: q.question || String(index), question: q.question, header: q.header, multiSelect: Boolean(q.multiSelect), options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description })) })) : undefined;
+  let description = input.plan ?? [...new Set([input.description, input.command, input.file_path, input.url].filter((value) => typeof value === "string" && value))].join("\n");
+  if (tool === "Edit") description += `\n\n修改前：\n\`\`\`\n${String(input.old_string ?? "").slice(0, 10000)}\n\`\`\`\n修改后：\n\`\`\`\n${String(input.new_string ?? "").slice(0, 10000)}\n\`\`\``;
+  if (tool === "Write" && typeof input.content === "string") description += `\n\n写入内容：\n\`\`\`\n${input.content.slice(0, 16000)}\n\`\`\``;
   return { id, provider: source, sessionId, kind: questions ? "question" : "approval", tool,
     title: questions ? "Claude 需要你选择" : tool === "ExitPlanMode" ? "计划已完成，是否执行？" : `允许 Claude 使用 ${tool}？`,
-    description: String(input.plan ?? input.description ?? input.command ?? input.file_path ?? input.url ?? JSON.stringify(input, null, 2)).slice(0, 24000),
+    description: String(description || JSON.stringify(input, null, 2)).slice(0, 24000),
     questions, choices: questions ? ["answer", "deny"] : tool === "ExitPlanMode" ? ["allow", "deny"] : ["allow", "deny"], createdAt: Date.now() };
 }
 

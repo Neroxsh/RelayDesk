@@ -36,7 +36,10 @@ export function codexPendingRequests(state) {
     if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(request.method)) {
       const available = p.availableDecisions;
       const choices = [["allow", "accept"], ["session", "acceptForSession"], ["deny", "decline"]].filter(([, value]) => !available || available.includes(value)).map(([key]) => key);
-      return [{ ...base, kind: "approval", title: request.method.includes("commandExecution") ? "允许执行命令？" : "允许修改文件？", description: [p.reason, p.command, p.cwd].filter(Boolean).join("\n").slice(0, 16000), choices, tool: request.method }];
+      const turns = state.turnHistory?.kind === "canonical" ? Object.values(state.turnHistory.history?.entitiesByKey ?? {}) : state.turns ?? [];
+      const item = turns.flatMap((turn) => Array.isArray(turn.items) ? turn.items : Object.values(turn.items?.history?.entitiesByKey ?? {})).find((entry) => entry.id === p.itemId);
+      const files = (item?.changes ?? []).map((change) => `${change.path ?? "文件修改"}\n${change.diff ? `\`\`\`diff\n${String(change.diff).slice(0, 12000)}\n\`\`\`` : ""}`).join("\n");
+      return [{ ...base, kind: "approval", title: request.method.includes("commandExecution") ? "允许执行命令？" : "允许修改文件？", description: [p.reason, p.command, p.cwd || state.cwd, p.grantRoot, files].filter(Boolean).join("\n").slice(0, 24000), choices, tool: request.method }];
     }
     if (request.method === "item/permissions/requestApproval") return [{ ...base, kind: "approval", title: "允许扩展权限？", description: `${p.reason ?? ""}\n${JSON.stringify(p.permissions, null, 2)}`.slice(0, 16000), choices: ["allow", "deny"], tool: request.method }];
     if (request.method === "item/tool/requestUserInput") return (p.questions ?? []).some((q) => q.isSecret) ? [{ ...base, kind: "notice", title: "请在电脑填写敏感信息", choices: [] }] : [{ ...base, kind: "question", title: "需要你选择", questions: (p.questions ?? []).map((q) => ({ ...q, multiSelect: false })), choices: ["answer"], tool: request.method }];
