@@ -366,6 +366,7 @@ async function sessionDetail(provider, sessionId) {
   } else {
     const run = activeRuns.get(session.key);
     session.control = run ? { available: true, canSend: false, canStop: true, canSetPermissions: run.canSetPermissions, source: "claude-managed", pending: interactions.list(session.id) } : await claudeLiveStatus(session.id);
+    if (session.control?.source === "claude-terminal" && session.control.available) session.state = session.control.working ? "working" : "idle";
     if (run?.settings) session.settings = { ...session.settings, ...run.settings, source: "managed-live" };
   }
   return stableSessionSnapshot(session);
@@ -666,6 +667,7 @@ async function handleCommand(config, clientId, payload) {
     await sendRequestResponse(config, clientId, requestId, {
       type: "request:error",
       requestId,
+      ...(error?.dispatched === true || error?.code === "DELIVERY_UNCERTAIN" ? { status: "uncertain" } : error?.dispatched === false ? { status: "failed" } : {}),
       sessionKey: payload?.provider && payload?.sessionId ? `${payload.provider}:${payload.sessionId}` : undefined,
       error: userFacingError(error),
     });

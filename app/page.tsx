@@ -349,7 +349,7 @@ export default function Home() {
       if (action) { clearTimeout(action.timer); actionRequestsRef.current.delete(String(payload.requestId)); setRespondingIds((v) => v.filter((id) => id !== action.interactionId)); }
       setSwitchingProvider(false);
       if (payload.requestId) deliveryAcksRef.current.get(payload.requestId)?.();
-      if (payload.requestId) updateOutbox(payload.requestId, { status: "failed", error: String(payload.error ?? "请求失败") });
+      if (payload.requestId) updateOutbox(payload.requestId, { status: payload.status === "uncertain" ? "uncertain" : "failed", error: String(payload.error ?? "请求失败") });
       setToast(String(payload.error ?? "请求失败"));
       const key = payload.sessionKey as string | undefined;
       if (key) setRunning((value) => { const next = { ...value }; delete next[key]; return next; });
@@ -762,8 +762,8 @@ export default function Home() {
             const entry = outboxRef.current.get(id);
             if (!entry) return;
             if (["retryable", "failed"].includes(entry.status)) {
-              const retry = { ...entry, payload: { ...entry.payload, retry: true, attemptId: requestId() } };
-              updateOutbox(id, { payload: retry.payload });
+              const retry = { ...entry, createdAt: Date.now(), payload: { ...entry.payload, retry: true, attemptId: requestId() } };
+              updateOutbox(id, { payload: retry.payload, createdAt: retry.createdAt });
               void deliverEntry(retry);
             }
             else queryPendingRef.current?.();

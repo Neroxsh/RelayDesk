@@ -13,6 +13,12 @@ export class RequestLedger {
     catch (error) { if (error?.code !== "ENOENT") throw new Error("消息回执记录不可读；已暂停发送以避免重复执行"); }
     for (const [key, record] of Object.entries(saved)) {
       if (record.expiresAt <= Date.now()) continue;
+      // Previous agents returned this pre-dispatch validation failure without a
+      // status. Preserve deduplication, but let the user explicitly retry it once
+      // after upgrading. Unknown or uncertain errors remain non-retryable.
+      if (record.response?.type === "request:error" && record.response.status == null && record.response.error === "无法确定唯一的 Claude 原进程，请刷新会话") {
+        record.response = { ...record.response, status: "failed" };
+      }
       if (["received", "running"].includes(record.response?.status)) {
         record.response = { ...record.response, status: "uncertain", error: "代理已恢复，正在核实此前消息，请勿重复发送" };
       }

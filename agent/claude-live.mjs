@@ -9,7 +9,7 @@ import { interactions } from "./interactions.mjs";
 import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { verifyClaudeProcess } from "./claude-process.mjs";
+import { verifyClaudeProcess, findClaudeParent } from "./claude-process.mjs";
 
 const connections = new Map();
 const removed = new Set();
@@ -23,6 +23,55 @@ async function loadConnection(id) {
     if (saved[id]) connections.set(id, saved[id]);
   }
   return connections.get(id);
+}
+function normalizedSocket(value, platform) {
+  if (typeof value !== "string" || !value) return "";
+  const socket = value.replace(/^uds:/, "");
+  return platform === "win32" ? socket.toLowerCase() : socket;
+}
+function bindingError(message) { return Object.assign(new Error(message), { code: "CLAUDE_TARGET_UNAVAILABLE", dispatched: false }); }
+
+// One terminal can contain a Claude parent and a resumed child process. The socket
+// captured by SessionStart selects its owner, rather than whichever PID was
+// discovered first, or whichever process happens to be newest.
+export function resolveClaudeBinding(id, connection, sessions, platform = process.platform) {
+  if (!connection?.socket || !connection?.token) throw bindingError("请在电脑重新打开此 Claude 会话，以启用手机接入");
+  const active = [...new Map(sessions.filter((row) => row.sessionId === id && Number.isSafeInteger(row.pid) && row.pid > 0).map((row) => [row.pid, row])).values()];
+  const socket = normalizedSocket(connection.socket, platform);
+  const matches = active.filter((row) => normalizedSocket(row.messagingSocketPath || row.sock || row.socket, platform) === socket);
+  let target;
+  if (matches.length === 1) target = matches[0];
+  else if (matches.length > 1) throw bindingError("多个 Claude 进程登记了同一个连接地址，暂不能确认目标，请刷新会话");
+  else {
+    // Older registries may not publish a socket. A captured PID is usable only
+    // when that row has no conflicting socket and its process can be verified.
+    const byPid = active.filter((row) => row.pid === connection.pid && !row.messagingSocketPath && !row.sock && !row.socket);
+    if (byPid.length !== 1) throw bindingError("已绑定的 Claude 终端连接已失效，请在电脑重新打开此会话");
+    target = byPid[0];
+  }
+  let startedAt = target.pid === connection.pid && Number.isFinite(connection.startedAt) ? connection.startedAt : undefined;
+  // Windows procStart is FILETIME (100 ns since 1601). The registry's startedAt
+  // is the later session-registration time and must not be used as process birth.
+  if (platform === "win32" && /^\d{17,20}$/.test(String(target.procStart ?? ""))) {
+    const value = Number(BigInt(target.procStart) / 10000n - 11644473600000n);
+    if (value > 0 && Number.isSafeInteger(value)) startedAt = value;
+  }
+  return { target, processCount: active.length, connection: { ...connection, pid: target.pid, startedAt } };
+}
+
+async function boundConnection(id, sessions = undefined) {
+  const saved = await loadConnection(id);
+  const resolved = resolveClaudeBinding(id, saved, sessions ?? await activeClaudeSessions());
+  if (!Number.isFinite(resolved.connection.startedAt)) {
+    const processInfo = await findClaudeParent(resolved.target.pid);
+    if (processInfo?.pid !== resolved.target.pid || !Number.isFinite(processInfo.startedAt)) throw bindingError("暂时无法验证 Claude 原进程身份，请刷新会话");
+    resolved.connection.startedAt = processInfo.startedAt;
+  }
+  if (saved.pid !== resolved.connection.pid || saved.startedAt !== resolved.connection.startedAt) {
+    connections.set(id, resolved.connection);
+    await saveConnections();
+  }
+  return resolved;
 }
 function saveConnections() {
   saving = saving.catch(() => undefined).then(async () => {
@@ -80,12 +129,16 @@ export async function handleClaudeHook(body, { mobileActive = () => false, signa
   } finally { signal?.removeEventListener("abort", abort); }
 }
 export async function claudeLiveStatus(id) {
-  const live = (await activeClaudeSessions()).find((s) => s.sessionId === id);
-  const connection = await loadConnection(id);
-  if (!live) { connections.delete(id); return null; }
-  const canStop = connection && process.platform === "win32" && connection.pid && await terminalKey(connection, "probe");
-  return { available: Boolean(connection), canSend: Boolean(connection), canStop: Boolean(canStop), canSetPermissions: false, pending: interactions.list(id), source: "claude-terminal",
-    reason: connection ? "连接电脑原 Claude 进程；发送后会在当前工具调用结束后处理。" : "此终端尚未连接手机控制。请在电脑退出并重新运行 claude --resume，恢复同一会话后即可连接。" };
+  const sessions = await activeClaudeSessions();
+  if (!sessions.some((s) => s.sessionId === id)) { connections.delete(id); return null; }
+  try {
+    const { connection, target, processCount } = await boundConnection(id, sessions);
+    const canStop = process.platform === "win32" && await terminalKey(connection, "probe");
+    return { available: true, canSend: true, canStop: Boolean(canStop), canSetPermissions: false, pending: interactions.list(id), source: "claude-terminal", processCount, working: target.status === "busy" || target.status === "waiting",
+      reason: "连接电脑原 Claude 进程；发送后会在当前工具调用结束后处理。" };
+  } catch (error) {
+    return { available: false, canSend: false, canStop: false, canSetPermissions: false, pending: interactions.list(id), source: "claude-terminal", reason: error.message };
+  }
 }
 async function terminalKey(connection, action) {
   if (process.platform !== "win32" || !Number.isSafeInteger(connection.pid) || !Number.isFinite(connection.startedAt)) return false;
@@ -97,20 +150,17 @@ async function terminalKey(connection, action) {
   } catch { return false; }
 }
 export async function stopClaudeLive(id) {
-  const connection = await loadConnection(id);
-  if (!connection || !await terminalKey(connection, "escape")) throw new Error("这个终端没有可用的停止连接，请在电脑按 Esc");
+  const { connection } = await boundConnection(id);
+  if (!await terminalKey(connection, "escape")) throw new Error("这个终端没有可用的停止连接，请在电脑按 Esc");
   return { ok: true };
 }
 export async function sendClaudeLive(session, prompt) {
-  const active = (await activeClaudeSessions()).filter((s) => s.sessionId === session.id);
-  if (active.length !== 1) throw new Error("无法确定唯一的 Claude 原进程，请刷新会话");
-  const connection = await loadConnection(session.id);
-  if (!connection) throw new Error("请在电脑重新打开此 Claude 会话，以启用手机接入");
-  if (connection.pid && !await verifyClaudeProcess(connection.pid, connection.startedAt)) throw new Error("Claude 原进程已变化，请重新打开会话连接");
+  const { connection } = await boundConnection(session.id);
+  if (!await verifyClaudeProcess(connection.pid, connection.startedAt)) throw bindingError("Claude 原进程已变化，请重新打开会话连接");
   const uuid = randomUUID();
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(connection.socket); let dispatched = false;
-    const fail = () => { const error = new Error(dispatched ? "Claude 消息已写入原进程，暂未确认；请查看会话，避免重复发送" : "Claude 原进程连接失败，请刷新"); error.code = dispatched ? "DELIVERY_UNCERTAIN" : "CLAUDE_UNAVAILABLE"; reject(error); socket.destroy(); };
+    const fail = () => { const error = new Error(dispatched ? "Claude 消息已写入原进程，暂未确认；请查看会话，避免重复发送" : "Claude 原进程连接失败，请刷新"); error.code = dispatched ? "DELIVERY_UNCERTAIN" : "CLAUDE_UNAVAILABLE"; error.dispatched = dispatched; reject(error); socket.destroy(); };
     const timer = setTimeout(fail, 5000);
     socket.once("error", () => { clearTimeout(timer); fail(); });
     socket.once("connect", () => {
